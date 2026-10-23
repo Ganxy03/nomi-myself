@@ -16,7 +16,7 @@
 import { BrowserWindow } from "electron";
 import { normalizeComfyuiBaseUrl } from "./comfyui/endpointResolver";
 import { registerAppWindow } from "./appWindowRegistry";
-import { collectLoadedNodeTypes, collectSourceNodeTypes, shouldRetryConversion, verifyLoadedGraph } from "./comfyuiGraphFidelity";
+import { collectLoadedNodeTypes, collectSourceNodeTypes, shouldRetryConversion, verifyLoadedGraph } from "./comfyui/graphFidelity";
 
 /** 前端就绪 + 转换的总超时（首次要下载 ComfyUI 前端资源，给足）。实测冷启 ~1.5s、热 ~0.4s。 */
 const CONVERT_TIMEOUT_MS = 45_000;
@@ -175,7 +175,7 @@ export async function convertUiWorkflowToApi(baseUrl: string, uiWorkflowText: st
           const ui = ${JSON.stringify(parsed)};
           await window.app.loadGraphData(ui, true, false);
           await new Promise((r) => setTimeout(r, 400));
-          // 加载之后图里**实际**是哪些节点：保真闸要用（见 comfyuiGraphFidelity.ts）。
+          // 加载之后图里**实际**是哪些节点：保真闸要用（见 comfyui/graphFidelity.ts）。
           const graph = window.app.graph;
           const loadedTypes = graph && graph._nodes ? graph._nodes.map((n) => n && n.type) : [];
           const p = await window.app.graphToPrompt();

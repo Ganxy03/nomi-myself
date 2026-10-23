@@ -49,7 +49,7 @@
 
 - 尺子（能力投影脚本 `verify.ts`）与被测物（目录里的 meta）是**两条线**：尺子读盘上事实，不复用被测代码的判断。
 - 有「修对了反而掉分」的先例吗：无——本次全部新增测试（`comfyuiCapabilityContract.test.ts`、
-  `nodeModelArchetype.comfyui.test.ts`、`comfyuiGraphFidelity.test.ts`）都是新文件，不改动旧断言的期望值。
+  `nodeModelArchetype.comfyui.test.ts`、`comfyui/graphFidelity.test.ts`）都是新文件，不改动旧断言的期望值。
 - 靶子本身有错吗：没有。本次修的是**被测物（产品代码）**，尺子不动。
 
 ## 5. P0：这些是我们独有的吗？现成方案有哪些
@@ -81,7 +81,7 @@
 - `electron/catalog/comfyuiCapabilityContract.test.ts`（能力面翻译：方式/槽/参数/超界默认值/坏键）
 - `src/workbench/generationCanvas/nodes/nodeModelArchetype.comfyui.test.ts`（渲染口径：ComfyUI 平铺 vs 他人走档案）
 - `electron/catalog/comfyuiLocal.test.ts`（内置预置带契约 + 老装机靠 seed 对账自愈）
-- `electron/comfyuiGraphFidelity.test.ts`（导入保真闸：没换图就判红）
+- `electron/comfyui/graphFidelity.test.ts`（导入保真闸：没换图就判红）
 - `electron/catalog/comfyuiManualEnable.test.ts`（手动放行落 `unverified` 并清 runId）
 - 只读投影脚本 `/private/tmp/nomi-harness/seed/verify.ts`（装好版目录 → `inputContract:'known'`）
 

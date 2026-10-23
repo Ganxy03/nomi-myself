@@ -5,8 +5,8 @@ import {
   collectSourceNodeTypes,
   shouldRetryConversion,
   verifyLoadedGraph,
-} from "./comfyuiGraphFidelity";
-import { describeLoadError } from "./comfyuiGraphConvert";
+} from "./graphFidelity";
+import { describeLoadError } from "../comfyuiGraphConvert";
 
 /**
  * 保真闸的契约（真机踩坑后补的）：
