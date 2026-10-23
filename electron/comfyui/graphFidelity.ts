@@ -14,7 +14,7 @@
 //
 // 文案走 desktopT（electron/desktopStrings.ts，**也是 electron-free**）：用户能直接读到这段原因，
 // 所以它得跟着桌面语言走，不能在主进程里写死中文。
-import { desktopT } from "./desktopStrings";
+import { desktopT } from "../desktopStrings";
 
 export type GraphFidelityResult = {
   ok: boolean;
