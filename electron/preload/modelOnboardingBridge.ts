@@ -76,6 +76,19 @@ export const modelOnboardingBridge = {
       invokeSync("nomi:model-catalog:comfyui:import-workflow", payload),
     updateComfyWorkflow: (payload: { modelKey: string; text: string; binding: unknown; labelZh: string; enumOptions?: unknown; vendorKey?: string; uiWorkflowText?: string }) =>
       invokeSync("nomi:model-catalog:comfyui:update-workflow", payload),
+    /**
+     * 「完全 ComfyUI 模式」（2026-10-23）：模型清单只留 ComfyUI 实例名下的条目。
+     * 走 invoke 而非 invokeSync —— 同步通道被 scripts/check-renderer-sync-ipc.mjs 冻结（只减不增），
+     * 而且开这个开关要落库读盘，本来就不该卡渲染进程。
+     */
+    getComfyuiOnlyMode: () => ipcRenderer.invoke("nomi:model-catalog:comfyui:only-mode-get"),
+    setComfyuiOnlyMode: (enabled: boolean) =>
+      ipcRenderer.invoke("nomi:model-catalog:comfyui:only-mode-set", enabled),
+    /** 认证放宽：这条工作流能不能被「跳过真实验证直接启用」。旧 preload 可能没有 → 可选。 */
+    getComfyuiManualEnableAvailability: (vendorKey: string, modelKey: string) =>
+      ipcRenderer.invoke("nomi:model-catalog:comfyui:manual-enable-availability", { vendorKey, modelKey }),
+    manuallyEnableComfyWorkflow: (vendorKey: string, modelKey: string) =>
+      ipcRenderer.invoke("nomi:model-catalog:comfyui:manual-enable", { vendorKey, modelKey }),
   },
   connector: {
     tikhub: {

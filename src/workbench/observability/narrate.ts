@@ -4,6 +4,7 @@
 // S2 先覆盖生成进度域;错误 hint(classifyGenerationError 七段)按总方案在 S4 迁入。
 // 设计系统铁律呼应:No fake progress——没有真实百分比就不给 percent,用"已等 N 秒"说真话。
 import i18n from '../../i18n'
+import type { GenerationPhase } from '../../../electron/shared/generationPhase'
 
 export type GenerationProgressPhase =
   | 'queued' //      已入队,还没开始
@@ -30,7 +31,7 @@ export type ProgressNarrationContext = {
 }
 
 /** C1: backend stages stay stable; this is the sole user-facing phase vocabulary. */
-export type GenerationFeedbackPhase = 'queued' | 'submitting' | 'generating' | 'finalizing' | 'failed'
+export type GenerationFeedbackPhase = GenerationPhase
 
 export const GENERATION_PHASE: Record<GenerationProgressPhase, GenerationFeedbackPhase> = {
   queued: 'queued',

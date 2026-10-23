@@ -450,6 +450,16 @@
         "symbol": "vendorModelConnection"
       },
       "reason": "2026-10-21 文本任务迁 pi-ai 单次调用：ai@4 的 buildAiSdkModel 随栈删除。「运行时 base 在造模型之前按协议规范化」（Anthropic 补 /v1）挪进两台发动机共用的 vendorModelConnection（anthropicBaseUrl），Agent、文本任务、编译器都经它拿连接配置；顺手修掉 lane 只存根地址时打到 {root}/messages 的 404（laneModelCall.test.ts）。"
+    },
+    {
+      "contract": "docs/fixes/2026-09-11-audio-reference-slot-gate.root-cause.json",
+      "path": "electron/catalog/comfyuiWorkflowImport.ts",
+      "symbol": "analyzeComfyWorkflow / isMediaInput",
+      "anchor": {
+        "path": "electron/catalog",
+        "symbol": "analyzeComfyWorkflow / resolveMediaWidgetKind"
+      },
+      "reason": "2026-10-23 接 ComfyUI 时，「这个 widget 是不是媒体槽」的判据从 comfyuiWorkflowImport.ts 拆到同目录 comfyuiWorkflowMediaSlots.ts：原来的私有 isMediaInput 改写成导出的 resolveMediaWidgetKind（三路证据：/object_info 声明的槽类型 IMAGE/VIDEO/AUDIO、载入节点类名 Load*/VHS_LoadVideo、媒体文件名扩展名），analyzeComfyWorkflow 仍在原文件里负责扫描并调用它。锚放到 electron/catalog 目录以同时盖住拆分的两个文件。这条不变量（音频输入必须被认成媒体槽，不能退化成裸文本 widget）本身没变——新判据更宽，且 electron/catalog/comfyuiWorkflowMediaSlots.test.ts 与 comfyCertificationFixtures 一起持有它。"
     }
   ],
   "retirements": [

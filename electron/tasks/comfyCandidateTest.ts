@@ -8,6 +8,7 @@ import { CertificationMediaError } from "../providerAdapter/certificationMedia";
 import type { TaskResult } from "../runtime";
 import { redactNetworkMessage } from "../networkErrorDetails";
 import { stripNomiErrorCode } from "../shared/nomiErrorCodes";
+import type { GenerationPhase } from "../shared/generationPhase";
 import { logError } from "../logging/logger";
 
 export type ComfyCandidateTestResult =
@@ -31,8 +32,47 @@ type CandidateTestDependencies = {
   onSubmitted?: (remoteTaskId: string) => void | Promise<void>;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
+  /** Overrides the per-kind budget below. Values are clamped into [1 min, 3 h] — never a free-for-all. */
   timeoutMs?: number;
 };
+
+/**
+ * 2026-10-23：canonical run 的时限**按产物种类分档**。
+ *
+ * 以前一刀切 300s（5 分钟）。那是按「云端 API 出图」的量级定的，可 ComfyUI 视频工作流一张 5s 镜
+ * 单节点就要 5–6 分钟（实测 480P/5s/124 帧单镜 293s，再加模型就绪与落盘）——**注定永远验证不过**：
+ * 用户看到的是「工作流明明能跑，导入就报 candidate_timeout」，而真实原因只是时限比片子短。
+ * 视频/3D 给到 40 分钟（图/文 12 分钟），并且失败时回报卡在哪一段（见 stage 字段），
+ * 让「排队太久」与「采样卡死」不再是一句笼统的 provider_failed。
+ */
+/** canonical run 卡在哪一段。失败详情与日志都带它——「排队」和「采样」是两回事。 */
+type CandidateStage = Exclude<GenerationPhase, "finalizing" | "failed">;
+
+const CANDIDATE_TIMEOUT_MS: Record<string, number> = {
+  image: 12 * 60_000,
+  text_to_image: 12 * 60_000,
+  image_edit: 12 * 60_000,
+  video: 40 * 60_000,
+  text_to_video: 40 * 60_000,
+  image_to_video: 40 * 60_000,
+  model3d: 40 * 60_000,
+  text_to_3d: 40 * 60_000,
+  image_to_3d: 40 * 60_000,
+};
+const CANDIDATE_TIMEOUT_DEFAULT_MS = 12 * 60_000;
+const CANDIDATE_TIMEOUT_MIN_MS = 1;
+const CANDIDATE_TIMEOUT_MAX_MS = 3 * 60 * 60_000;
+
+/**
+ * 时限按 taskKind 分档；调用方显式给的 timeoutMs 生效。
+ * 夹取只防「离谱值」（NaN / 负数 / 一天），不二次篡改调用方的显式意图——宿主与测试给的毫秒数就是它要的。
+ */
+export function candidateTimeoutMs(taskKind: string, override?: number): number {
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.min(CANDIDATE_TIMEOUT_MAX_MS, Math.max(CANDIDATE_TIMEOUT_MIN_MS, override));
+  }
+  return CANDIDATE_TIMEOUT_MS[taskKind] ?? CANDIDATE_TIMEOUT_DEFAULT_MS;
+}
 
 const inFlight = new Map<string, Promise<ComfyCandidateTestResult>>();
 const controllers = new Map<string, AbortController>();
@@ -97,16 +137,17 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
   });
 }
 
-function safeFailure(revisionId: string, error: unknown, timedOut: boolean): ComfyCandidateTestResult {
+function safeFailure(revisionId: string, error: unknown, timedOut: boolean, stage: CandidateStage): ComfyCandidateTestResult {
   // reasonCode 是给用户看的粗码，原始错误以前在这里被彻底丢掉：真机上「/prompt 明明成功了
   // 却报 provider_failed」时，盘上、界面上、日志里全都没有线索。日志已脱敏（redactError）。
-  logError("onboarding", "comfy-candidate-test-failed", error, { revisionId, timedOut });
+  logError("onboarding", "comfy-candidate-test-failed", error, { revisionId, timedOut, stage });
   if (error instanceof CertificationMediaError) {
     return { ok: false, revisionId, reasonCode: error.reasonCode, params: error.params };
   }
-  if (timedOut) return { ok: false, revisionId, reasonCode: "candidate_timeout", params: {} };
-  if (error instanceof Error && error.name === "AbortError") return { ok: false, revisionId, reasonCode: "candidate_cancelled", params: {} };
-  return { ok: false, revisionId, reasonCode: "provider_failed", params: {} };
+  // 卡在哪一段要写进失败详情：排队（GPU 被别的任务占着）与采样（真跑不动了）是两条排查路。
+  if (timedOut) return { ok: false, revisionId, reasonCode: "candidate_timeout", params: { stage } };
+  if (error instanceof Error && error.name === "AbortError") return { ok: false, revisionId, reasonCode: "candidate_cancelled", params: { stage } };
+  return { ok: false, revisionId, reasonCode: "provider_failed", params: { stage } };
 }
 
 async function executeCandidate(
@@ -122,10 +163,12 @@ async function executeCandidate(
     return { ok: false, revisionId: intent.revisionId, reasonCode: "candidate_stale", params: {} };
   }
   let timedOut = false;
+  /** 卡在哪一段——超时/失败时回报给用户与日志（见 safeFailure）。 */
+  let stage: CandidateStage = "submitting";
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort(Object.assign(new Error("candidate timeout"), { name: "AbortError" }));
-  }, dependencies.timeoutMs ?? 300_000);
+  }, candidateTimeoutMs(intent.taskKind, dependencies.timeoutMs));
   try {
     let result = await awaitWithAbort(dependencies.runTask(intent.payload), controller.signal);
     // For ComfyUI the task result id is the remote prompt id (the mapping's
@@ -137,6 +180,9 @@ async function executeCandidate(
       : undefined;
     if (remoteTaskId) await dependencies.onSubmitted?.(remoteTaskId);
     while (result.status === "queued" || result.status === "running") {
+      // 排队 vs 采样要分得开：前者是 GPU 被占（ComfyUI 队列里前面还有别的活），
+      // 后者是这次真跑不动了。时限到点时用户看到的提示必须能指对方向。
+      stage = result.status === "queued" ? "queued" : "generating";
       await (dependencies.sleep || wait)(dependencies.pollIntervalMs ?? 1_000, controller.signal);
       result = (await awaitWithAbort(dependencies.fetchTaskResult({
         taskId: result.id,
@@ -169,7 +215,7 @@ async function executeCandidate(
       taskKind: intent.taskKind,
       ...(error instanceof CertificationMediaError ? { reasonCode: error.reasonCode } : {}),
     });
-    return safeFailure(intent.revisionId, error, timedOut);
+    return safeFailure(intent.revisionId, error, timedOut, stage);
   } finally { clearTimeout(timeout); }
 }
 

@@ -13,6 +13,10 @@ import { type CatalogState, type Mapping, type ProfileKind } from "./types";
 import { modelHasPublishedExecution } from "../shared/modelPublication";
 import type { ModelAvailability } from "../shared/modelAvailability";
 import { createCatalogAvailability } from "./catalogModelAvailability";
+// 「完全 ComfyUI 模式」的收窄判据。**只能引这个零运行时 import 的模块**（不能引 comfyuiOnlyMode：
+// 那份带 catalogStore 的 import 会把 electron/catalog/types.ts 拖进 tests/agent-runtime 的 NodeNext
+// 原生测试工程，整份 program 立刻炸出一片报在 electron/ai/* 上的 TS2835 假红）。理由见该文件头注释。
+import { comfyuiOnlyVendorKeys } from "./comfyuiOnlyScope";
 import { SINGLE_SHOT_GENERATION_MODULE_ID } from "../shared/generationModuleId";
 
 /** 一个模型跨其所有 mapping 汇总出的参考承载力 + 是哪些模式（taskKind）带得动。 */
@@ -133,7 +137,12 @@ export function deriveModelListing(
   // 钥匙的 per-vendor 记忆化住在可用性派生器里（同一份 memo 同时答「能不能用」和「钥匙什么态」）。
   // 这里再建第二份 Map 就是第二次 safeStorage 往返 + 第二行重复的解密失败日志。
   const availability = createCatalogAvailability(state, deps.keyStatusProbe);
+  // 「完全 ComfyUI 模式」（2026-10-23）：开了就把清单收窄到 ComfyUI 实例名下。
+  // 收敛在这一处而不是各处过滤——画布下拉、任务中心、MCP/Agent 的 nomi_list_models、
+  // 生产放行范围（readConnectedModelScope）全都吃这份清单，改一处即处处一致。
+  const comfyuiOnlyKeys = comfyuiOnlyVendorKeys(state);
   return state.models
+    .filter((model) => !comfyuiOnlyKeys || comfyuiOnlyKeys.has(model.vendorKey))
     .filter((model) => modelHasPublishedExecution(model, { mappings: state.mappings }))
     .map((model) => {
       const vendor = vendorByKey.get(model.vendorKey);

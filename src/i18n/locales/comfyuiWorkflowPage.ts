@@ -50,6 +50,15 @@ export const zhComfyuiWorkflowPage = {
     deleteMessage: '确定删除「{{name}}」吗？画布上已经用它生成过的结果不受影响。',
     noOutput: '还没指定成品节点——不知道从哪取结果，保存了也跑不出东西',
   },
+  // 认证放宽（2026-10-23）：跳过那次真实验证直接放行。文案必须把「没验过」和代价说在前面——
+  // 用户点了就再也看不出这条工作流到底跑没跑通过，只有目录里 manual_ack 那道痕迹。
+  manualEnable: {
+    action: '跳过验证，直接启用',
+    title: '跳过真实验证，直接启用？',
+    message: '正常流程会真跑一次「{{name}}」（提交 → 等出图 → 下载校验），长视频工作流可能要几十分钟。跳过就等于相信它自己跑得通：直接启用，但这条工作流会一直标着「未经验证（手动放行）」，跑不通时不会有任何提示。',
+    confirm: '我确认过，直接启用',
+    hint: '不跑真实校验直接启用（会留下「未经验证」标记）',
+  },
 
   graph: {
     aria: '工作流节点图',
@@ -115,6 +124,7 @@ export const zhComfyuiWorkflowPage = {
     saveFailed: '保存失败：{{error}}',
     deleteFailed: '删除失败：{{error}}',
     unsupported: '当前版本不支持编辑工作流',
+    manualEnableFailed: '跳过验证启用失败：{{error}}',
   },
 } as const
 
@@ -168,6 +178,13 @@ export const enComfyuiWorkflowPage = {
     deleteTitle: 'Delete this workflow',
     deleteMessage: 'Delete “{{name}}”? Results already generated with it on the canvas are unaffected.',
     noOutput: 'No output node assigned yet — there is nowhere to read the result from',
+  },
+  manualEnable: {
+    action: 'Skip verification, enable',
+    title: 'Skip the real verification and enable?',
+    message: 'The normal path runs “{{name}}” for real (submit → wait for output → download and check), which can take tens of minutes for video workflows. Skipping means trusting it on its own: it is enabled immediately, but stays marked “unverified (manually enabled)”, and nothing will warn you if it does not run.',
+    confirm: 'I checked it — enable anyway',
+    hint: 'Enable without a real verification run (leaves an “unverified” marker)',
   },
 
   graph: {
@@ -234,5 +251,6 @@ export const enComfyuiWorkflowPage = {
     saveFailed: 'Save failed: {{error}}',
     deleteFailed: 'Delete failed: {{error}}',
     unsupported: 'Editing workflows is unavailable in this version',
+    manualEnableFailed: 'Could not skip verification: {{error}}',
   },
 } satisfies TranslationShape<typeof zhComfyuiWorkflowPage>

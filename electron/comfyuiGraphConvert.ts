@@ -16,9 +16,18 @@
 import { BrowserWindow } from "electron";
 import { normalizeComfyuiBaseUrl } from "./comfyui/endpointResolver";
 import { registerAppWindow } from "./appWindowRegistry";
+import { collectLoadedNodeTypes, collectSourceNodeTypes, shouldRetryConversion, verifyLoadedGraph } from "./comfyuiGraphFidelity";
 
 /** 前端就绪 + 转换的总超时（首次要下载 ComfyUI 前端资源，给足）。实测冷启 ~1.5s、热 ~0.4s。 */
 const CONVERT_TIMEOUT_MS = 45_000;
+/**
+ * 前端「不报错、也不换图」的兜底重试次数。
+ * 真机遇到过：ComfyUI 那边正在跑长任务时，前端 loadGraphData 解析完却没把图换掉，
+ * 图里还是它启动时那套默认工作流。重试一次通常就正常（多半是首次加载时前端自己还没准备好）。
+ */
+const CONVERT_ATTEMPTS = 3;
+/** 重试间隔（毫秒）。给前端一点时间把上一轮的图收干净。 */
+const CONVERT_RETRY_DELAY_MS = 800;
 /** 独立 session 分区：躲开 Nomi 自己的 CSP 注入（见下方窗口创建处注释）。 */
 const CONVERTER_PARTITION = "persist:comfyui-graph-convert";
 /** 窗口闲置多久后关掉（连续导入多张时复用，省掉每次几秒的前端加载）。 */
@@ -158,31 +167,65 @@ export async function convertUiWorkflowToApi(baseUrl: string, uiWorkflowText: st
   }
 
   try {
-    const raw = await holder.win.webContents.executeJavaScript(
-      `(async () => {
+    const sourceTypes = collectSourceNodeTypes(parsed);
+    // 每轮都在页面里做同一件事：把界面格式塞进前端 → 看它实际加载出了什么 → 导出 API 格式。
+    // 注意传的是**对象**（前端 loadGraphData 不吃字符串，早期版本传字符串会静默不换图）。
+    const script = `(async () => {
         try {
           const ui = ${JSON.stringify(parsed)};
           await window.app.loadGraphData(ui, true, false);
           await new Promise((r) => setTimeout(r, 400));
+          // 加载之后图里**实际**是哪些节点：保真闸要用（见 comfyuiGraphFidelity.ts）。
+          const graph = window.app.graph;
+          const loadedTypes = graph && graph._nodes ? graph._nodes.map((n) => n && n.type) : [];
           const p = await window.app.graphToPrompt();
           const api = (p && (p.output || p.workflow_api)) || null;
           if (!api || typeof api !== 'object') return { ok: false, error: '转换结果为空' };
-          return { ok: true, api };
+          return { ok: true, api, loadedTypes };
         } catch (e) {
           return { ok: false, error: String(e && e.message ? e.message : e).slice(0, 200) };
         }
-      })()`,
-    );
-    scheduleIdleClose(base);
-    const result = raw as { ok?: boolean; api?: Record<string, unknown>; error?: string };
-    if (!result?.ok || !result.api) return { ok: false, error: result?.error || "转换失败" };
-    const nodeCount = Object.keys(result.api).length;
-    if (nodeCount === 0) return { ok: false, error: "转换结果没有任何节点" };
-    return { ok: true, api: result.api, nodeCount };
+      })()`;
+
+    let lastReason = "";
+    for (let attempt = 1; attempt <= CONVERT_ATTEMPTS; attempt += 1) {
+      const raw = await holder.win.webContents.executeJavaScript(script);
+      scheduleIdleClose(base);
+      const result = raw as { ok?: boolean; api?: Record<string, unknown>; error?: string; loadedTypes?: unknown };
+      if (!result?.ok || !result.api) return { ok: false, error: describeLoadError(result?.error) };
+      // 保真闸：前端有可能「不报错、也不加载」，图里还是它启动时那套。
+      // 这种时候 graphToPrompt 照样吐得出东西——不比对就是把别人的图当我们的结果交出去。
+      const fidelity = verifyLoadedGraph(sourceTypes, collectLoadedNodeTypes(result.loadedTypes));
+      if (fidelity.ok) {
+        const nodeCount = Object.keys(result.api).length;
+        if (nodeCount === 0) return { ok: false, error: "转换结果没有任何节点" };
+        return { ok: true, api: result.api, nodeCount };
+      }
+      lastReason = fidelity.reason || "转换结果与原工作流对不上";
+      if (shouldRetryConversion(fidelity, attempt, CONVERT_ATTEMPTS)) {
+        await new Promise((r) => setTimeout(r, CONVERT_RETRY_DELAY_MS));
+      }
+    }
+    return { ok: false, error: lastReason };
   } catch (e) {
     scheduleIdleClose(base);
-    return { ok: false, error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200) };
+    return { ok: false, error: describeLoadError(e instanceof Error ? e.message : String(e)) };
   }
+}
+
+/**
+ * 把前端抛出来的原始报错翻成人话。
+ * DataCloneError（structuredClone 克隆不了）是这类工作流最常见的死法：
+ * 某些节点包的 properties 里塞了不可克隆的对象，前端一读就炸——
+ * 原文是 "Failed to execute 'structuredClone' on 'Window': #<Object> could not be cloned."，
+ * 用户看不懂，我们得说清楚「这张图这台机器读不进去」。
+ */
+export function describeLoadError(raw: unknown): string {
+  const text = typeof raw === "string" ? raw : "";
+  if (/structuredClone|could not be cloned|DataCloneError/i.test(text)) {
+    return "ComfyUI 前端读不进这张工作流（节点数据里有它克隆不了的内容，通常是节点包版本比本机新）。";
+  }
+  return text.slice(0, 200) || "转换失败";
 }
 
 /** 纯函数（可单测）：这段文本看起来是不是「界面格式」——决定要不要试转换。 */

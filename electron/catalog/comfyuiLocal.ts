@@ -23,6 +23,7 @@ import { registerResponseTransform, type ResponseTransformFn } from "../tasks/re
 import { registerRequestTransform } from "../tasks/requestTransforms";
 import { fetchComfyuiCheckpoints } from "../comfyuiObjectInfo";
 import { getComfyuiClientId, resolveComfyuiPromptId } from "../comfyui/clientSession";
+import { buildComfyuiCapabilityContract, type ComfyuiCapabilityParam } from "./comfyuiCapabilityContract";
 
 function isRec(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -251,7 +252,12 @@ export const COMFYUI_VENDOR_SEED = {
 /** 共享参数标签（comfyuiPresets 复用，i18n 字面量门单源）。 */
 export const COMFY_NEGATIVE_LABEL = "负向提示词";
 
-const TXT2IMG_PARAMETERS = [
+// 参数表**一份**同时供三处用：meta.parameters（画布控件）、create.defaultParams（headless 兜底）、
+// 能力契约的 params（设置页的「输入与生成方式」展示面）。写成一份是为了不漂——
+// 契约里的参数要是另抄一份，两边迟早对不上，用户在设置页看到的控件名和画布上的就不是同一个。
+type Txt2imgParameter = ComfyuiCapabilityParam;
+
+const TXT2IMG_PARAMETERS: Txt2imgParameter[] = [
   // ckpt_name 默认留空 = 提交时从本机 /object_info derive 第一个 checkpoint（"comfyui-prompt" 请求变换）。
   // 旧默认写死 v1-5-pruned-emaonly.safetensors——没这个文件的人首跑必炸（微信 #2921「没任何反应」族根因）。
   { key: "ckpt_name", label: "模型权重（checkpoint 文件名）", type: "text", default: "", placeholder: "留空 = 自动用本机第一个 checkpoint" },
@@ -263,9 +269,12 @@ const TXT2IMG_PARAMETERS = [
     key: "comfy_sampler", label: "采样器", type: "select", default: "euler",
     options: ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "ddim", "uni_pc"],
   },
-  { key: "comfy_seed", label: "随机种子", type: "number", default: 156680208700286 },
+  // 种子默认取 1e12 以内：能力契约的数字上限是 1e12（customCapabilityContract 的 MAX_ABS_NUMBER），
+  // 超界的默认值在翻译层会被丢掉 → 参数变成「空输入」→ 画布底栏不渲染它 → 铁律 ⑪ 报「选不到」。
+  // 这个默认值本来就是任意的一个随机种子，改小不影响任何行为。
+  { key: "comfy_seed", label: "随机种子", type: "number", default: 156680208700 },
   { key: "comfy_negative", label: COMFY_NEGATIVE_LABEL, type: "text", default: "", placeholder: "不想出现的内容（可留空）" },
-] as const;
+];
 
 /** 从参数表派生 headless 兜底默认值（单一真相源：与 UI 控件 default 同表，避免两处漂移）。 */
 const TXT2IMG_DEFAULT_PARAMS: Record<string, unknown> = Object.fromEntries(
@@ -409,8 +418,38 @@ const TXT2IMG_QUERY_OP: HttpOperation = {
   response_mapping: { image_url: "image_url", error_message: "error" },
 };
 
+// 内置的「本地 · 文生图」预置模型。它也带能力契约：否则设置页显示「输入与生成方式 · 尚未设置」，
+// 画布模型列表被「完成输入与请求方式后，才能显示在画布的模型列表中」挡在门外——
+// 而这条预置明明只有一种生成方式（文生图）、提示词是必填的，没什么好问用户的。
+// 契约从**同一份参数表**派生（不另抄），老装机靠 seed 对账自动补齐（reconcileModels 比 meta 漂移）。
+const TXT2IMG_CAPABILITY_CONTRACT = buildComfyuiCapabilityContract({
+  kind: "image",
+  taskKinds: ["text_to_image"],
+  promptRequired: true,
+  mediaSlots: [],
+  params: TXT2IMG_PARAMETERS.map((p) => ({
+    key: p.key,
+    label: p.label,
+    type: p.type,
+    ...(p.default !== undefined ? { default: p.default } : {}),
+    ...(p.options ? { options: [...p.options] } : {}),
+    ...(p.min !== undefined ? { min: p.min } : {}),
+    ...(p.max !== undefined ? { max: p.max } : {}),
+    ...(p.step !== undefined ? { step: p.step } : {}),
+    ...(p.placeholder !== undefined ? { placeholder: p.placeholder } : {}),
+  })),
+});
+
 export const COMFYUI_CURATED_MODELS = [
-  { modelKey: "comfyui-txt2img", labelZh: "本地 · 文生图", kind: "image" as const, meta: { parameters: TXT2IMG_PARAMETERS } },
+  {
+    modelKey: "comfyui-txt2img",
+    labelZh: "本地 · 文生图",
+    kind: "image" as const,
+    meta: {
+      parameters: TXT2IMG_PARAMETERS,
+      ...(TXT2IMG_CAPABILITY_CONTRACT ? { customCapabilityContract: TXT2IMG_CAPABILITY_CONTRACT } : {}),
+    },
+  },
 ];
 
 export const COMFYUI_CURATED_MAPPINGS = [

@@ -152,6 +152,15 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
   const [busy, setBusy] = React.useState(false)
   const [reconcile, setReconcile] = React.useState<Reconcile | null>(null)
   const [uiWorkflowText, setUiWorkflowText] = React.useState('')
+  /**
+   * 工作流管理器（2026-10-23）：这条是「新建」还是「覆盖已有那条」。
+   *
+   * 为什么要覆盖：用户改工作流的频率远高于新建（调一个 combo 值、加一个节点包、改参考图槽），
+   * 每次都新建一条 = 模型列表越滚越长、旧那条还挂在画布下拉里。选一条已存在的作为目标时，
+   * 主进程那条 updateComfyWorkflow 会**原 modelKey 覆盖**（走完整认证链，绑定照常可改）。
+   */
+  const [updateTargetKey, setUpdateTargetKey] = React.useState('')
+  const [updateTargets, setUpdateTargets] = React.useState<Array<{ modelKey: string; labelZh: string }>>([])
   const reconcileSeq = React.useRef(0)
   const candidateRef = React.useRef<{ revisionId: string; modelKey: string; taskKind: TaskKind } | null>(null)
   const replaceCandidate = React.useCallback((candidate: { revisionId: string; modelKey: string; taskKind: TaskKind } | null) => {
@@ -222,6 +231,27 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
       .finally(() => setBusy(false))
   }, [catalog, text, t, runReconcile, vendorKey])
 
+  // 打开面板时拉一遍这台机器上的「导入进来的工作流」，作为覆盖目标。只收带原始 JSON 的那些
+  // （内置文生图没有 draft，覆盖不了——硬塞进去等于把它那套固定 mapping 冲掉）。
+  React.useEffect(() => {
+    if (!open || !catalog?.listModels) return
+    let cancelled = false
+    void Promise.resolve(catalog.listModels()).then((rows) => {
+      if (cancelled) return
+      const mine = (rows as Array<Record<string, unknown>>)
+        .filter((row) => String(row.vendorKey || '') === String(vendorKey || 'comfyui-local'))
+        .filter((row) => {
+          const meta = row.meta && typeof row.meta === 'object' ? (row.meta as { comfyWorkflowImport?: unknown }) : null
+          const draft = meta?.comfyWorkflowImport
+          return Boolean(draft && typeof draft === 'object' && typeof (draft as { text?: unknown }).text === 'string')
+        })
+        .map((row) => ({ modelKey: String(row.modelKey || ''), labelZh: String(row.labelZh || row.modelKey || '') }))
+        .filter((row) => row.modelKey)
+      setUpdateTargets(mine)
+    }).catch(() => { if (!cancelled) setUpdateTargets([]) })
+    return () => { cancelled = true }
+  }, [open, catalog, vendorKey])
+
   const paramKeyError = React.useMemo(() => {
     const problem = paramKeyProblem(binding?.params ?? [], workflowMediaBindings(binding ?? {}))
     if (problem === 'invalid') return t('onboardingProviders.comfyWorkflow.paramKeyInvalid')
@@ -242,6 +272,7 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
         vendorKey: vendorKey || 'comfyui-local',
         name,
         workflow: text,
+        ...(updateTargetKey ? { modelKey: updateTargetKey } : {}),
         binding,
         ...(enumOptions ? { enumOptions } : {}),
         ...(uiWorkflowText ? { uiWorkflow: uiWorkflowText } : {}),
@@ -253,7 +284,7 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value))
     } finally { setBusy(false) }
-  }, [binding, text, labelZh, reset, onImported, onVerificationRequested, paramKeyError, reconcile, vendorKey, uiWorkflowText, t])
+  }, [binding, text, labelZh, updateTargetKey, reset, onImported, onVerificationRequested, paramKeyError, reconcile, vendorKey, uiWorkflowText, t])
 
   if (!open) {
     return (
@@ -592,6 +623,29 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
             {paramKeyError ? <div className="text-micro text-workbench-danger">{paramKeyError}</div> : null}
           </div>
 
+          {/* 覆盖目标：默认「新建」；选一条已存在的就变成更新那条（modelKey 不变）。 */}
+          {updateTargets.length > 0 ? (
+            <BindRow label={t('onboardingProviders.comfyWorkflow.targetLabel')}>
+              <NomiSelect
+                value={updateTargetKey}
+                onChange={(value) => {
+                  const next = String(value ?? '')
+                  setUpdateTargetKey(next)
+                  // 覆盖时名字沿用原来那条（不覆盖成空名），新建时才让用户自己起。
+                  const picked = updateTargets.find((row) => row.modelKey === next)
+                  if (picked) setLabelZh(picked.labelZh)
+                }}
+                options={[
+                  { value: '', label: t('onboardingProviders.comfyWorkflow.targetNew') },
+                  ...updateTargets.map((row) => ({ value: row.modelKey, label: row.labelZh })),
+                ]}
+                ariaLabel={t('onboardingProviders.comfyWorkflow.targetLabel')} size="sm"
+                triggerMaxWidth={200}
+                className="max-w-full"
+              />
+            </BindRow>
+          ) : null}
+
           <div className="flex items-center gap-2 pt-0.5">
             <input
               value={labelZh} onChange={(e) => setLabelZh(e.target.value)}
@@ -603,7 +657,11 @@ export function ComfyuiWorkflowImportPanel({ onImported, onVerificationRequested
               className={cn('inline-flex items-center gap-1.5 h-8 px-3.5 rounded-nomi-sm bg-nomi-ink text-nomi-paper',
                 'text-caption font-medium hover:bg-nomi-accent disabled:opacity-45')}
             >
-              <IconFileImport size={14} stroke={1.8} />{busy ? t('onboardingProviders.comfyWorkflow.importing') : t('onboardingProviders.comfyWorkflow.import')}
+              <IconFileImport size={14} stroke={1.8} />{busy
+                ? t('onboardingProviders.comfyWorkflow.importing')
+                : updateTargetKey
+                  ? t('onboardingProviders.comfyWorkflow.updateAction')
+                  : t('onboardingProviders.comfyWorkflow.import')}
             </button>
           </div>
         </div>

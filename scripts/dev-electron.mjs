@@ -102,7 +102,14 @@ function start(command, args, options = {}) {
 }
 
 function startElectron(options = {}) {
-  return start(electron, ["."], options);
+  // 把 `pnpm dev -- <args>` 里的额外参数透传给 Electron——
+  // 调试期最常用的是 `--remote-debugging-port=9222`（要 CDP 连进渲染层查状态/截图）。
+  // 开关（- 开头）必须排在 app 路径**前面**，否则 Electron 会当成应用自己的 argv 收走；
+  // pnpm 转发时还会塞一个 "--" 进来，那不是开关，先剔掉。
+  const passthrough = process.argv.slice(2).filter((arg) => arg !== "--");
+  const switches = passthrough.filter((arg) => arg.startsWith("-"));
+  const appArgs = passthrough.filter((arg) => !arg.startsWith("-"));
+  return start(electron, [...switches, ".", ...appArgs], options);
 }
 
 function startTailwindWatcher() {

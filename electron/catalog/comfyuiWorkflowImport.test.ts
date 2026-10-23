@@ -437,6 +437,19 @@ describe("buildImportedWorkflow", () => {
 });
 
 describe("buildComfyImportModelMapping", () => {
+  it("导入即写能力契约（不然设置页永远「输入与生成方式 · 尚未设置」）", () => {
+    const built = buildImportedWorkflow(WAN_I2V, analyzeComfyWorkflow(WAN_I2V).suggested);
+    const { model } = buildComfyImportModelMapping(built, {
+      modelKey: "comfy-wan-i2v",
+      labelZh: "本地 WAN 图生视频",
+      draft: { text: JSON.stringify(WAN_I2V), binding: analyzeComfyWorkflow(WAN_I2V).suggested },
+    });
+    const meta = model.meta as { customCapabilityContract?: { modes: Array<{ id: string; slots: unknown[] }> } };
+    expect(meta.customCapabilityContract?.modes.map((mode) => mode.id)).toEqual(["image_to_video"]);
+    // 图输入正是这条工作流 taskKind 的判据 → 图槽必填。
+    expect(meta.customCapabilityContract?.modes[0].slots.length).toBeGreaterThan(0);
+  });
+
   it("视频工作流 → model kind video + mapping i2v + query 读 video_url + comfyui-history 变换", () => {
     const built = buildImportedWorkflow(WAN_I2V, analyzeComfyWorkflow(WAN_I2V).suggested);
     const { model, mapping } = buildComfyImportModelMapping(built, { modelKey: "comfy-wan-i2v", labelZh: "本地 WAN 图生视频" });

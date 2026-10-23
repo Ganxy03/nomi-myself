@@ -41,6 +41,13 @@
         "src/workbench/api/taskApi.ts::type:TaskStatus/type-union"
       ],
       "survivingOwner": "electron/shared/taskStatus.ts::type:TaskStatus/type-union"
+    },
+    {
+      "reason": "2026-10-23 接 ComfyUI 时，主进程候选真机验证（electron/tasks/comfyCandidateTest.ts）要回报「卡在哪一段」，于是把渲染层那五段（queued/submitting/generating/finalizing/failed）又抄了一份，只取其中三段。同一套阶段名两处各抄一份就会分叉——渲染层认 finalizing、主进程不认，同一件事在两处说得不一样。按中立模块收敛：electron/shared/generationPhase.ts 导出 GENERATION_PHASES as const tuple，渲染层 GenerationFeedbackPhase 与主进程 CandidateStage 都从它 derive，两份字面量联合删除。",
+      "retiredOwners": [
+        "src/workbench/observability/narrate.ts::type:GenerationFeedbackPhase/type-union"
+      ],
+      "survivingOwner": "electron/shared/generationPhase.ts::variable:GENERATION_PHASES/as-const"
     }
   ],
   "registered": [
@@ -1775,8 +1782,8 @@
         "queued",
         "submitting"
       ],
-      "reason": "用户批准的 C1 五段生成反馈唯一语义 owner；后端十阶段由 narrate 的穷举 Record 映射，所有媒体消费者共用。",
-      "site": "src/workbench/observability/narrate.ts::type:GenerationFeedbackPhase/type-union"
+      "reason": "用户批准的 C1 五段生成反馈唯一语义 owner；后端十阶段由 narrate 的穷举 Record 映射，所有媒体消费者共用。2026-10-23 起 owner 住在中立模块 electron/shared/generationPhase.ts（渲染层 GenerationFeedbackPhase 与主进程 CandidateStage 都从它 derive），文案仍归 narrate 注册表。",
+      "site": "electron/shared/generationPhase.ts::variable:GENERATION_PHASES/as-const"
     },
     {
       "members": [

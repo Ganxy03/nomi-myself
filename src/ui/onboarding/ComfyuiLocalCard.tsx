@@ -68,6 +68,16 @@ function hasWorkflowGraph(meta: unknown, mappings: ComfyuiLocalCardProps['mappin
   return Boolean(prompt && typeof prompt === 'object' && !Array.isArray(prompt))
 }
 
+/**
+ * 这条工作流是不是「手动放行、没验过」（认证放宽那条后门，主进程落 comfyWorkflowImport.verification=manual_ack）。
+ * 目录里留了痕，UI 就必须说出来——不然「没验过」这件事只存在库里，用户永远看不见。
+ */
+function isManuallyEnabledWorkflow(meta: unknown): boolean {
+  const draft = meta && typeof meta === 'object' ? (meta as { comfyWorkflowImport?: unknown }).comfyWorkflowImport : null
+  if (!draft || typeof draft !== 'object') return false
+  return (draft as { verification?: unknown }).verification === 'manual_ack'
+}
+
 export function ComfyuiLocalCard({ vendorKey, instanceName, enabled, baseUrl, models, mappings, onChanged, onVerificationRequested, onOpenDetails, detailMode = false }: ComfyuiLocalCardProps): JSX.Element | null {
   const { t } = useTranslation()
   // 多实例：所有写操作都打到**这一台**（缺省第一台，存量调用零改动）。
@@ -88,6 +98,9 @@ export function ComfyuiLocalCard({ vendorKey, instanceName, enabled, baseUrl, mo
   const [activeWorkflowActionKey, setActiveWorkflowActionKey] = React.useState<string | null>(null)
   const [addrDraft, setAddrDraft] = React.useState(baseUrl || 'http://127.0.0.1:8188')
   const shownAddr = baseUrl || 'http://127.0.0.1:8188'
+  // 「完全 ComfyUI 模式」是全局意图（落第一台 ComfyUI 实例的 meta 上），所以每张实例卡读写的都是同一个值：
+  // 第二台机器的卡上打开/关掉，等于改全局开关。
+  const [onlyMode, setOnlyMode] = React.useState(false)
 
   const probe = React.useCallback(async (): Promise<ComfyuiHealth> => {
     if (!catalog?.probeComfyui) return { ok: false, error: t('onboardingProviders.comfyLocal.unsupportedProbe') }
@@ -110,6 +123,30 @@ export function ComfyuiLocalCard({ vendorKey, instanceName, enabled, baseUrl, mo
     if (enabled) void probe()
     else setHealth(null)
   }, [enabled, probe])
+
+  React.useEffect(() => {
+    let cancelled = false
+    void catalog?.getComfyuiOnlyMode?.()
+      .then((r) => { if (!cancelled && r) setOnlyMode(Boolean(r.enabled)) })
+      .catch(() => { /* 旧版 preload 没这条口：开关保持关闭，不报错 */ })
+    return () => { cancelled = true }
+  }, [catalog])
+
+  const toggleOnlyMode = async (next: boolean) => {
+    setOnlyMode(next)
+    try {
+      const r = await catalog?.setComfyuiOnlyMode?.(next)
+      if (r && 'ok' in r && !r.ok) {
+        setOnlyMode(!next)
+        report('only-mode-failed', r.error)
+        return
+      }
+      onChanged() // 清单派生的收窄要重查，下拉才真的少掉云厂商
+    } catch (e) {
+      setOnlyMode(!next)
+      report('only-mode-failed', e instanceof Error ? e.message : String(e))
+    }
+  }
 
   if (!catalog) return null
 
@@ -328,11 +365,12 @@ export function ComfyuiLocalCard({ vendorKey, instanceName, enabled, baseUrl, mo
             const Icon = isVideo ? IconMovie : IconPhoto
             const canDelete = m.modelKey !== BUILTIN_COMFYUI_TXT2IMG_MODEL_KEY
             const canConfigure = canDelete && hasWorkflowGraph(m.meta, mappings, m.modelKey, key)
+            const manuallyEnabled = isManuallyEnabledWorkflow(m.meta)
             const actionsVisible = activeWorkflowActionKey === m.modelKey
             const rowBody = (
               <>
                 <Icon size={16} className="text-nomi-ink-60 shrink-0" />
-                <div className="flex-1 min-w-0 text-left"><div className="text-body-sm text-nomi-ink truncate">{m.labelZh}</div><div className="text-micro text-nomi-ink-30">{isVideo ? t('onboardingProviders.comfyWorkflow.video') : t('onboardingProviders.comfyWorkflow.image')} {t('onboardingProviders.comfyLocal.workflowKindSuffix')}</div></div>
+                <div className="flex-1 min-w-0 text-left"><div className="text-body-sm text-nomi-ink truncate">{m.labelZh}</div><div className="text-micro text-nomi-ink-30">{isVideo ? t('onboardingProviders.comfyWorkflow.video') : t('onboardingProviders.comfyWorkflow.image')} {t('onboardingProviders.comfyLocal.workflowKindSuffix')}{manuallyEnabled ? <span className="text-nomi-accent"> · {t('onboardingProviders.comfyLocal.unverifiedManualBadge')}</span> : null}</div></div>
               </>
             )
             return (
@@ -403,6 +441,19 @@ export function ComfyuiLocalCard({ vendorKey, instanceName, enabled, baseUrl, mo
           </button>
 
           {addrRow}
+
+          <label className="flex items-start gap-2.5 rounded-nomi-sm bg-nomi-ink-05 px-3 py-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={onlyMode}
+              onChange={(e) => void toggleOnlyMode(e.target.checked)}
+              className="mt-0.5 accent-nomi-ink"
+            />
+            <span className="min-w-0">
+              <span className="block text-body-sm font-semibold text-nomi-ink">{t('onboardingProviders.comfyLocal.onlyModeLabel')}</span>
+              <span className="block text-micro text-nomi-ink-60 mt-0.5 leading-relaxed">{t('onboardingProviders.comfyLocal.onlyModeHint')}</span>
+            </span>
+          </label>
 
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => void probe()} disabled={checking} className="inline-flex items-center gap-1 h-8 px-2.5 text-caption text-nomi-ink-60 rounded-nomi-sm border border-nomi-line hover:border-nomi-ink-30 hover:text-nomi-accent disabled:opacity-50">

@@ -126,8 +126,22 @@ export function isSlowLaneBackend(kind: TaskKind, vendor: string): boolean {
     || SLOW_LOCAL_BACKENDS.has(vendor) || isComfyuiVendorKey(vendor)
 }
 
-/** 轮询预算(ms):慢道(视频/本地进程后端)5min 软 / 20min 硬;快道云 API 2min 软=硬。 */
+/**
+ * ComfyUI 专属档（2026-10-23）。
+ *
+ * ComfyUI 与「云端视频 API」不是一种时延：它跑的是**用户自己的工作流**，一张图里串几个镜头、
+ * 外加分镜循环的批量产物，几十分钟起步是常态（实测 MiniMax-H3 480P/5s/124 帧单镜就要 5.4 分钟，
+ * 768P 单镜 5.8–7.0 分钟，一批 4 镜再加模型就绪）。把它塞进「慢道 20 分钟硬超时」= 长片被腰斩成
+ * 「可找回」，用户重拉一次又是同样一刀。
+ *
+ * 取 10min 软 / 90min 硬：软超时只把文案切成「仍在生成·已超常规时长」（后台继续等），
+ * 硬超时才真停——落可找回、可免费重拉取。再往上就没意义了，那是真的卡住。
+ */
+export const COMFYUI_POLL_BUDGET_MS = { softMs: 600000, hardMs: 5400000 } as const
+
+/** 轮询预算(ms):ComfyUI 10min 软 / 90min 硬;慢道(视频/本地进程后端)5min 软 / 20min 硬;快道云 API 2min 软=硬。 */
 export function resolvePollBudget(kind: TaskKind, vendor: string): { softMs: number; hardMs: number } {
+  if (isComfyuiVendorKey(vendor)) return COMFYUI_POLL_BUDGET_MS
   return isSlowLaneBackend(kind, vendor)
     ? { softMs: 300000, hardMs: 1200000 }
     : { softMs: 120000, hardMs: 120000 }

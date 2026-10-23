@@ -12,6 +12,8 @@ import {
 } from "./catalog/comfyuiWorkflowImportStore";
 import { fetchComfyuiTemplateDetail, fetchComfyuiTemplates } from "./comfyuiTemplates";
 import { readCatalog } from "./catalog/catalogStore";
+import { readComfyuiOnlyMode, setComfyuiOnlyMode } from "./catalog/comfyuiOnlyMode";
+import { manualEnableAvailability, manuallyEnableComfyWorkflow } from "./catalog/comfyuiManualEnable";
 import { COMFYUI_VENDOR_KEY } from "./catalog/types";
 import { listComfyuiPresets } from "./catalog/comfyuiPresets";
 import { interruptComfyuiTask, unwatchComfyuiTask, watchComfyuiTask } from "./comfyuiProgressSocket";
@@ -98,5 +100,27 @@ export function registerComfyuiIpc(registerSyncIpc: RegisterSyncIpc): void {
   ipcMain.handle("nomi:tasks:comfyui:interrupt", (event, promptId: unknown) => {
     assertTrustedSender(event);
     return interruptComfyuiTask(promptId);
+  });
+  // 「完全 ComfyUI 模式」（2026-10-23）：目录清单收窄到 ComfyUI 实例名下。
+  // 写库走主进程——vendor.meta 在 upsertVendor 里是**整块替换**（customConfig 那条特判之外），
+  // 渲染层手上没有完整旧 meta，一写就把 extraHeaders / 候选谱系抹了。
+  ipcMain.handle("nomi:model-catalog:comfyui:only-mode-get", (event) => {
+    assertTrustedSender(event);
+    return { enabled: readComfyuiOnlyMode() };
+  });
+  ipcMain.handle("nomi:model-catalog:comfyui:only-mode-set", (event, enabled: unknown) => {
+    assertTrustedSender(event);
+    return setComfyuiOnlyMode(enabled === true);
+  });
+  // 认证放宽：跳过那次真实验证直接放行（留痕 manual_ack，见 comfyuiManualEnable 文件头）。
+  ipcMain.handle("nomi:model-catalog:comfyui:manual-enable", (event, payload: unknown) => {
+    assertTrustedSender(event);
+    const raw = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+    return manuallyEnableComfyWorkflow({ vendorKey: String(raw.vendorKey || ""), modelKey: String(raw.modelKey || "") });
+  });
+  ipcMain.handle("nomi:model-catalog:comfyui:manual-enable-availability", (event, payload: unknown) => {
+    assertTrustedSender(event);
+    const raw = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+    return manualEnableAvailability(readCatalog(), String(raw.vendorKey || ""), String(raw.modelKey || ""));
   });
 }

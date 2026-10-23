@@ -19,10 +19,6 @@
     "count": 1,
     "reason": "保留（协调拍板）：滑块拇指色边是控件本体"
   },
-  "src/workbench/generationCanvas/nodes/director/DirectorViewShell.tsx": {
-    "count": 1,
-    "reason": "保留：主按钮（强调色底 + 同色边）"
-  },
   "src/workbench/library/WorkflowLibraryContent.tsx": {
     "count": 1,
     "reason": "保留：主按钮（强调色底 + 同色边）"

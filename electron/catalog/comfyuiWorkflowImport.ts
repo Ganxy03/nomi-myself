@@ -15,9 +15,19 @@ import type { ComfyComboValue, ComfyObjectInfoIndex } from "../comfyuiObjectInfo
 import { normalizeWorkflowBinding } from "./comfyuiWorkflowBindingNormalize";
 import { comfyOutputCandidates, resolveComfyWorkflowOutput, suggestedComfyOutput } from "./comfyuiWorkflowOutput";
 import { resolveComfyWorkflowTaskKind } from "./comfyuiWorkflowTaskContract";
+import { buildComfyuiCapabilityContract } from "./comfyuiCapabilityContract";
+// 媒体槽判据（三路证据 + 往上游追源）2026-10-23 拆出单文件，见该文件头注释。
+import { declaredInputType, mediaKindByDeclaredType, resolveMediaWidgetKind, traceMediaWidget } from "./comfyuiWorkflowMediaSlots";
+import { isPromptLikeKey } from "./comfyuiWorkflowPromptKeys";
 
 export { inputKeyOf, roleBoundInputKeys } from "./comfyuiWorkflowBindingNormalize";
 export { normalizeWorkflowBinding };
+// 提示词键判据搬到 comfyuiWorkflowPromptKeys（媒体槽判据也要用它，留在本文件会成运行时环），这里原样转出。
+export { isPromptLikeKey };
+// 对账那族 2026-10-23 拆去了 comfyuiWorkflowReconcile.ts，这里原样转出：调用方（导入面板 / 模板库 /
+// 认证前置检查）不改一行，体积门也过得去。
+export { collectGraphEnumOptions, reconcileComfyWorkflow } from "./comfyuiWorkflowReconcile";
+export type { MissingEnumValue, WorkflowReconcile } from "./comfyuiWorkflowReconcile";
 
 export type ComfyNode = {
   class_type?: string;
@@ -110,17 +120,10 @@ export type WorkflowEnumOption = { classType: string; inputKey: string; options:
 // 节点类型识别（R5：class_type 命名——CLIPTextEncode/LoadImage/VHS_VideoCombine/SaveVideo/SaveImage/
 // WanVideoWrapper 系；宽松正则容社区变体）。
 const TEXT_ENCODE_RE = /textencode|encode.*text|cliptext/i;
-const LOAD_IMAGE_RE = /loadimage/i;
 /** 视频输入节点（视频编辑/视频转视频工作流的入口）。语料实测 52 处，此前完全绑不上。 */
 const LOAD_VIDEO_RE = /loadvideo|vhs_loadvideo/i;
-/**
- * 音频输入节点（用户报的根因「ComfyUI 音频输入用不了」）。官方核心节点 class_type 就叫 `LoadAudio`，
- * 输入键叫 `audio`（ComfyUI 源码 comfy_extras/nodes_audio.py，`node_id="LoadAudio"` /
- * `IO.Combo.Input("audio", upload=IO.UploadType.audio, ...)`，2026-09-11 核实）——与
- * MEDIA_INPUT_KEYS 早就收着的 "audio" 键名完全对得上；只是一直没有配套的 class_type 识别正则，
- * 于是 isMediaInput 永远判 false，音频输入退化成裸文本 widget（用户得手填 ComfyUI 内部文件名）。
- */
-const LOAD_AUDIO_RE = /loadaudio/i;
+// LOAD_IMAGE_RE / LOAD_AUDIO_RE 与「音频输入节点」的根因注释 2026-10-23 随媒体槽判据一起搬去了
+// comfyuiWorkflowMediaSlots.ts（这里只剩视频这一路还被 analyze 用到）。
 /**
  * 载入节点「装文件名的那个输入键」。
  *
@@ -130,28 +133,6 @@ const LOAD_AUDIO_RE = /loadaudio/i;
  * 教训：节点输入键必须拿真服务器的 object_info 对，不能照着自己编的 fixture 写。
  */
 const MEDIA_INPUT_KEYS = new Set(["image", "file", "video", "audio"]);
-/**
- * 直接写在节点上的提示词键（云端 API 节点形态：prompt 就是节点自己的 widget，没有独立 CLIPTextEncode）。
- * 语料实测：154 张识别不出提示词的图里 112 张（73%）其实 prompt 字符串就摆在节点上——全部
- * ByteDance/Grok/Gemini/Kling/Runway 等云端节点工作流都踩这条。
- */
-const INLINE_PROMPT_KEYS = new Set(["prompt", "positive_prompt", "text", "description"]);
-/**
- * 明确**不是**正向提示词的键（命中 `*_prompt` 规则但语义相反/另有用途）。
- * 实测本机 ComfyUI 全量 object_info：negative_prompt 出现在 30 个节点类、system_prompt 9 个。
- */
-const NON_POSITIVE_PROMPT_KEYS = new Set(["negative_prompt", "system_prompt"]);
-/**
- * 「这个键名像不像正向提示词」——**按规则派生，不列白名单**（P2 修根因）。
- * 白名单追不完：实测真实键名有 prompt_text(3 类) / texture_prompt(2) / user_prompt / structured_prompt /
- * text_prompt / text_style_prompt……以后厂商还会造新的。规则=「叫 prompt/text/description，
- * 或以 _prompt 结尾、prompt_ 开头」，再减掉明确非正向的那几个。
- */
-export function isPromptLikeKey(inputKey: string): boolean {
-  const key = inputKey.toLowerCase();
-  if (NON_POSITIVE_PROMPT_KEYS.has(key) || key.includes("negative")) return false;
-  return INLINE_PROMPT_KEYS.has(key) || key.endsWith("_prompt") || key.startsWith("prompt_");
-}
 /** text-encode 类节点上可能承载提示词的键（含 Flux 双编码器 clip_l/t5xxl、音频的 tags/lyrics）。 */
 const TEXT_ENCODE_TEXT_KEYS = new Set(["text", "prompt", "clip_l", "t5xxl", "tags", "lyrics"]);
 /** 像文件名/路径的字符串不是提示词（防把 "xxx.safetensors"、"video/ComfyUI" 当提示词）。 */
@@ -299,12 +280,20 @@ function candidateForNodeInput(candidates: NodeInputCandidate[], nodeId: string 
   return candidates.find((c) => c.nodeId === nodeId && c.inputKey === inputKey);
 }
 
-function findLinkedInputTargetId(graph: ComfyGraph, inputKeys: string[]): string | undefined {
+/**
+ * 找出「声明了首帧/尾帧语义的那个连线」指向谁。
+ *
+ * 2026-10-23：以前只回 nodeId，调用处再拿字面量 "image" 去 stillInputs 里配对——
+ * 于是任何键名不是 image 的载入节点（LoadVideo.file、H3 系列的 ref_image/start_frame…）
+ * **声明得再明确也配不上**，静默退化成「图里只有 1–2 个输入就拿第一个当首帧」的兜底。
+ * 连输入键一起回，配对才对得上。
+ */
+function findLinkedInput(graph: ComfyGraph, inputKeys: string[]): { nodeId: string; inputKey: string } | undefined {
   for (const node of Object.values(graph)) {
     const inputs = node.inputs || {};
     for (const inputKey of inputKeys) {
       const value = inputs[inputKey];
-      if (isLink(value)) return value[0];
+      if (isLink(value)) return { nodeId: value[0], inputKey };
     }
   }
   return undefined;
@@ -324,30 +313,90 @@ function isInlinePromptWidget(classType: string, inputKey: string, value: string
 }
 
 /**
- * 挑建议提示词：① 被 positive 连线指向的（语义最准）→ ② 排除负向后、键名像提示词的里挑最长
+ * 「这个文本槽有多像**正向提示词**」（分数越高越像）。
+ *
+ * 2026-10-23 之前这里只有「排除负向 + 按长度取最长」。在 H3 Studio 官方模板上实测**认错了**：
+ * 图里有 10 个 H3StudioWorkflowNote 便签节点，每个的 `text` 摆着一整段 markdown 说明，
+ * `isPromptLikeKey("text")` 又为真 —— 于是「最长」稳稳选中一篇说明文档，
+ * 而真正的提示词在 `H3StudioDirector.prompt`。真跑起来会把用户的提示词注进便签节点，一个字都不生效。
+ *
+ * 四条降权依据都是「事实」而不是「我猜作者怎么想的」：
+ *   · 下拉槽（/object_info 里有 combo 选项）是**选择器**，不可能是提示词（`prompt_writer` = 写模型名）；
+ *   · 便签/说明类节点（*Note / Readme / Doc）；
+ *   · 值本身是 markdown 文档（标题行 / 代码块 / 引用行）；
+ *   · 长得离谱（一段提示词不会到千字级）。
+ */
+const NOTE_NODE_RE = /note|readme|markdown|document|comment|info\b|说明|便签/i;
+function promptCandidateScore(candidate: NodeInputCandidate, index: ComfyObjectInfoIndex | null): number {
+  const key = candidate.inputKey.toLowerCase();
+  let score = 0;
+  if (key.includes("prompt")) score += 4;
+  else if (key === "description" || key === "positive_prompt") score += 2;
+  const options = index?.classes.get(candidate.classType)?.inputs.get(candidate.inputKey)?.options;
+  if (options && options.length > 0) score -= 6;
+  if (NOTE_NODE_RE.test(candidate.classType)) score -= 6;
+  const text = String(candidate.value ?? "");
+  if (/^\s*#/m.test(text) || text.includes("```") || /^\s*>/m.test(text)) score -= 5;
+  if (text.trim().length === 0) score -= 10;
+  else if (text.length > 1500) score -= 3;
+  return score;
+}
+
+/**
+ * 挑建议提示词：① 被 positive 连线指向的（语义最准）→ ② 排除负向后按**语义分**排（同分再比长度）
  * → ③ 第一个非负向 → ④ 兜底第一个。
  *
- * **负向必须先排除再谈长度**：负向提示词几乎总比正向长（一长串质量词），
- * 单纯按长度排序等于专挑负向。键名判定走 isPromptLikeKey（规则派生），
- * 厂商新造的 xxx_prompt 自动进候选，不必再改这里。
+ * **负向必须先排除**：负向提示词几乎总比正向长（一长串质量词），单纯按长度排序等于专挑负向。
+ * 键名判定走 isPromptLikeKey（规则派生），厂商新造的 xxx_prompt 自动进候选，不必再改这里。
+ * 打分（promptCandidateScore）在 2026-10-23 之前是纯长度，H3 Studio 模板上选中了便签正文，见该函数注释。
  */
-function pickSuggestedPrompt(textInputs: NodeInputCandidate[], positiveId: string | undefined): NodeInputCandidate | undefined {
+function pickSuggestedPrompt(textInputs: NodeInputCandidate[], positiveId: string | undefined, index: ComfyObjectInfoIndex | null): NodeInputCandidate | undefined {
   const byPositive = textInputs.find((t) => t.nodeId === positiveId);
   if (byPositive) return byPositive;
   const positives = textInputs.filter((t) => !isNegativeCandidate(t));
   const promptish = positives
     .filter((t) => isPromptLikeKey(t.inputKey) && typeof t.value === "string")
-    .sort((a, b) => String(b.value).length - String(a.value).length);
+    .sort((a, b) => promptCandidateScore(b, index) - promptCandidateScore(a, index)
+      || String(b.value).length - String(a.value).length);
   return promptish[0] ?? positives[0] ?? textInputs[0];
 }
 
-/** 扫全图，识别可绑定输入 + 给出建议绑定。 */
-export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
+/**
+ * 数值参数的建议规则（2026-10-23）。原来只有 NUMERIC_PRIORITY 那 12 个硬编码键名，
+ * 于是 H3 这类自建节点的 `duration` / `total_frames` / `shift` / `resolution` 全部进不了建议列表
+ * （只能用户自己去 widgetInputs 里翻）。这里按**规则**派生（与 isPromptLikeKey 同一思路，不列白名单）：
+ * 键名像「可调的生成参数」，且（若有索引）该槽确实申报为 INT/FLOAT。
+ */
+const NUMERIC_RULE_RE = /seed|step|cfg|guid|denoi|width|height|length|frame|fps|duration|second|shift|strength|scale|batch|resolution|count|size|sampler|top_?p|ratio|quality|steps?\b/i;
+/** 建议暴露的数值参数上限——一张 H3 图的数字 widget 能有几十个，全暴露等于没暴露。 */
+const SUGGESTED_PARAM_CAP = 16;
+
+function isNumericRuleKey(inputKey: string): boolean {
+  return NUMERIC_PRIORITY.includes(inputKey) || NUMERIC_RULE_RE.test(inputKey.toLowerCase());
+}
+
+/** 人话标签：节点自己写的 tooltip（多半是中文）优先，其次内置译名，最后原样键名。 */
+function numericLabel(index: ComfyObjectInfoIndex | null | undefined, classType: string, inputKey: string): string {
+  const tooltip = index?.classes.get(classType)?.inputs.get(inputKey)?.tooltip?.trim();
+  if (tooltip) return tooltip.split("\n")[0].slice(0, 60);
+  return NUMERIC_LABEL[inputKey] ?? inputKey;
+}
+
+/** 扫全图，识别可绑定输入 + 给出建议绑定。
+ *  index（本机 /object_info 能力索引）可选：有它才启用**声明类型驱动**的媒体/输出识别（见
+ *  resolveMediaWidgetKind 与 comfyuiWorkflowOutput 的类型判据）；没有时整条链退回纯类名启发式，
+ *  行为与 2026-10-23 之前完全一致。 */
+export function analyzeComfyWorkflow(graph: ComfyGraph, index?: ComfyObjectInfoIndex | null): WorkflowAnalysis {
+  const objectInfo = index ?? null;
   const textInputs: NodeInputCandidate[] = [];
   const imageInputs: NodeInputCandidate[] = [];
   const numericInputs: NodeInputCandidate[] = [];
   const widgetInputs: NodeInputCandidate[] = [];
-  const outputNodes = comfyOutputCandidates(graph);
+  const outputNodes = comfyOutputCandidates(graph, objectInfo);
+  /** 已认下的媒体槽（"nodeId inputKey"），上游追溯的结果要按它去重。 */
+  const mediaTokens = new Set<string>();
+  /** 媒体消费点：有索引时逐个追上游（见 traceMediaWidget 的来龙去脉）。 */
+  const mediaConsumers: Array<{ nodeId: string; inputKey: string; family: "image" | "video" | "audio" }> = [];
 
   for (const [nodeId, node] of Object.entries(graph)) {
     const classType = node.class_type ?? "";
@@ -363,12 +412,16 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
         pushUniqueCandidate(textInputs, resolveTextSourceFromInput(graph, value, new Set([nodeId])));
         continue;
       }
-      if (isLink(value)) continue; // 连线不可参数化；提示词连线已在上方追溯到可注入源
-      const isMediaInput =
-        typeof value === "string" &&
-        MEDIA_INPUT_KEYS.has(inputKey) &&
-        (LOAD_IMAGE_RE.test(classType) || LOAD_VIDEO_RE.test(classType) || LOAD_AUDIO_RE.test(classType));
-      if (!isMediaInput) {
+      if (isLink(value)) {
+        // 非提示词的连线：声明类型是媒体时记成消费点，等图扫完再统一往上游追源头（下面 traceMediaWidget）。
+        const family = mediaKindByDeclaredType(declaredInputType(objectInfo, classType, inputKey));
+        if (family) mediaConsumers.push({ nodeId, inputKey, family });
+        continue; // 连线不可参数化
+      }
+      const mediaKind = typeof value === "string"
+        ? resolveMediaWidgetKind(objectInfo, classType, inputKey, value)
+        : undefined;
+      if (!mediaKind) {
         pushScalarWidgetCandidate(widgetInputs, nodeId, node, inputKey, value);
       }
       if (typeof value === "string" && TEXT_ENCODE_RE.test(classType) && TEXT_ENCODE_TEXT_KEYS.has(inputKey)) {
@@ -380,18 +433,33 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
       } else if (typeof value === "string" && isInlinePromptWidget(classType, inputKey, value)) {
         // 云端 API 节点形态：prompt 直接是节点自己的 widget（没有独立 CLIPTextEncode 可追）。
         textInputs.push({ nodeId, inputKey, classType, title: node._meta?.title, value });
-      } else if (isMediaInput) {
-        const mediaKind = LOAD_VIDEO_RE.test(classType) ? ("video" as const)
-          : LOAD_AUDIO_RE.test(classType) ? ("audio" as const) : ("image" as const);
+      } else if (mediaKind) {
         imageInputs.push({ nodeId, inputKey, classType, title: node._meta?.title, value: value as string, mediaKind });
-      } else if (typeof value === "number" && NUMERIC_PRIORITY.includes(inputKey)) {
-        numericInputs.push({ nodeId, inputKey, classType, title: node._meta?.title, value });
+        mediaTokens.add(`${nodeId}|${inputKey}`);
+      } else if (typeof value === "number" && isNumericRuleKey(inputKey)) {
+        // 有索引时按声明类型再筛一道（挡掉「叫 size 的字符串」这类同名噪声）；没索引时与旧行为一致。
+        const declared = declaredInputType(objectInfo, classType, inputKey);
+        if (!objectInfo || declared === "INT" || declared === "FLOAT") {
+          numericInputs.push({ nodeId, inputKey, classType, title: node._meta?.title, value });
+        }
       }
     }
   }
 
+  // 上游追溯：把「只有连线、没有自己 widget」的媒体消费点认回它真正的载入槽。
+  if (objectInfo) {
+    for (const consumer of mediaConsumers) {
+      const traced = traceMediaWidget(graph, objectInfo, consumer.nodeId, consumer.inputKey, consumer.family);
+      if (!traced) continue;
+      const token = `${traced.nodeId}|${traced.inputKey}`;
+      if (mediaTokens.has(token)) continue; // 上面已按 widget 直接认下
+      mediaTokens.add(token);
+      imageInputs.push(traced);
+    }
+  }
+
   const positiveId = findPositiveTargetId(graph);
-  const suggestedPrompt = pickSuggestedPrompt(textInputs, positiveId);
+  const suggestedPrompt = pickSuggestedPrompt(textInputs, positiveId, objectInfo);
   // ⚠️ widgetInputs 是**完整**的标量池，故意不在这里摘掉提示词。
   //
   // 2026-08-03 那版在这里 splice 掉「被建议当提示词的那一个」，治了症状没治根：候选池被钉死在
@@ -401,8 +469,9 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
   // 当前 binding 现算（渲染层 comfyuiParamCandidates.ts），这里只负责给全量事实。
   // 真正的correctness兜底在 buildImportedWorkflow：同一个输入既当提示词又当参数时，
   // 参数占位会把 {{request.prompt}} 覆盖掉（用户的提示词静默丢失），那里结构性拒掉。
-  const startImageId = findLinkedInputTargetId(graph, ["start_image", "first_image", "first_frame", "image", "video"]);
-  const endImageId = findLinkedInputTargetId(graph, ["end_image", "last_image", "last_frame"]);
+  // 首尾锚点键名：start_frame 是 H3 系列 ImageToVideo 的写法（此前不在表里，白声明了也不认）。
+  const startImage = findLinkedInput(graph, ["start_image", "first_image", "first_frame", "start_frame", "image", "video"]);
+  const endImage = findLinkedInput(graph, ["end_image", "last_image", "last_frame"]);
   // 视频输入（LoadVideo.file）另立一槽 —— 它收的是**视频**，绝不能当首帧图发出去
   //（补帧/视频超分/视频去背景这类「视频进视频出」的工作流入口，语料 29 张）。
   // 音频输入（LoadAudio.audio）同理排除出 stillInputs：否则唯一的一个音频输入会被下面
@@ -411,12 +480,20 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
   const videoInputs = imageInputs.filter((i) => i.mediaKind === "video");
   const stillInputs = imageInputs.filter((i) => i.mediaKind !== "video" && i.mediaKind !== "audio");
   const suggestedSourceVideo = videoInputs[0];
+  // 锚点指向的可能就是消费节点本身（H3StartFrameFix / ImageToVideo.first_frame 这类），
+  // 那它不在 stillInputs 里——有索引时沿连线追回真正的载入槽，别退化成「取第一个」。
+  const anchoredStill = (anchor: { nodeId: string; inputKey: string } | undefined): NodeInputCandidate | undefined => {
+    if (!anchor) return undefined;
+    const direct = candidateForNodeInput(stillInputs, anchor.nodeId, anchor.inputKey);
+    if (direct) return direct;
+    return objectInfo ? traceMediaWidget(graph, objectInfo, anchor.nodeId, anchor.inputKey, "image") : undefined;
+  };
   // 只有图里明确声明了 start/end，或确实只有一个/两个静态输入时才给首尾语义。
   // 三张以上的 LoadImage 通常是角色/风格/构图等多参引用；把第一张擅自叫「首帧」会让
   // 画布把通用参考误投到 first_frame_url，正是用户反馈的「多参被压成一张」的另一种变体。
-  const suggestedFirstFrame = candidateForNodeInput(stillInputs, startImageId, "image")
+  const suggestedFirstFrame = anchoredStill(startImage)
     ?? (stillInputs.length <= 2 ? stillInputs[0] : undefined);
-  const suggestedLastFrame = candidateForNodeInput(stillInputs, endImageId, "image")
+  const suggestedLastFrame = anchoredStill(endImage)
     ?? (stillInputs.length === 2 ? stillInputs[1] : undefined);
   const suggestedImageTargets = new Set<string>();
   const suggestedImages: WorkflowImageBinding[] = [];
@@ -445,17 +522,31 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
   }
   const suggestedOutput = suggestedComfyOutput(outputNodes);
   // 建议数值参数：按优先序每个 inputKey 只取第一个（去重，clean）。
+  //
+  // 2026-10-23：NUMERIC_PRIORITY 那 12 个键名先走一遍（离线导入的旧行为一字未改），
+  // 之后再按 NUMERIC_RULE_RE 补齐规则命中的其余槽位（duration/total_frames/shift/resolution…），
+  // 补进来的只排在那 12 个之后且总数封顶 SUGGESTED_PARAM_CAP —— 一张 H3 图的数字 widget 几十个，
+  // 全端出来等于没端。标签优先用节点自己写的 tooltip（多半是中文，比键名可读）。
   const seenKey = new Set<string>();
   const suggestedNumeric: WorkflowNumericParam[] = [];
   const suggestedParams: WorkflowParamBinding[] = [];
-  for (const key of NUMERIC_PRIORITY) {
-    const hit = numericInputs.find((n) => n.inputKey === key);
-    if (hit && !seenKey.has(key)) {
-      seenKey.add(key);
-      const param = { nodeId: hit.nodeId, inputKey: key, paramKey: `comfy_${key}`, label: NUMERIC_LABEL[key] ?? key, default: hit.value as number };
-      suggestedNumeric.push(param);
-      suggestedParams.push({ ...param, type: "number" });
-    }
+  const pushSuggestedNumeric = (hit: NodeInputCandidate | undefined): void => {
+    if (!hit || seenKey.has(hit.inputKey)) return;
+    seenKey.add(hit.inputKey);
+    const param = {
+      nodeId: hit.nodeId,
+      inputKey: hit.inputKey,
+      paramKey: `comfy_${hit.inputKey}`,
+      label: numericLabel(objectInfo, hit.classType, hit.inputKey),
+      default: hit.value as number,
+    };
+    suggestedNumeric.push(param);
+    suggestedParams.push({ ...param, type: "number" });
+  };
+  for (const key of NUMERIC_PRIORITY) pushSuggestedNumeric(numericInputs.find((n) => n.inputKey === key));
+  for (const candidate of numericInputs) {
+    if (suggestedParams.length >= SUGGESTED_PARAM_CAP) break;
+    pushSuggestedNumeric(candidate);
   }
 
   return {
@@ -471,73 +562,6 @@ export function analyzeComfyWorkflow(graph: ComfyGraph): WorkflowAnalysis {
       params: suggestedParams,
     },
   };
-}
-
-/** 一条「引用了本机没有的文件/选项」记录（combo 枚举对不上：checkpoint/LoRA/VAE 文件名、采样器名…）。 */
-export type MissingEnumValue = { nodeId: string; classType: string; title?: string; inputKey: string; value: string };
-export type WorkflowReconcile = {
-  /** 本机 ComfyUI 没装的节点类（缺自定义节点包，运行必失败）。 */
-  unknownNodeTypes: string[];
-  /** 输入值不在本机 combo 可选项里（多半 = 作者机器上的模型文件名，本机没这个文件）。 */
-  missingEnumValues: MissingEnumValue[];
-};
-
-/**
- * 导入时对账（纯函数）：workflow 每个节点/每个标量输入 vs 本机 /object_info 能力索引。
- * 抄自 Krita AI Diffusion 的「清单 vs object_info」思路（generic 版：不需要预置清单，全图逐项核）——
- * 缺节点/缺模型是 ComfyUI 接入第一死因，在导入面板就说清，不等 /prompt 400 或 execution_error 再猜。
- */
-export function reconcileComfyWorkflow(graph: ComfyGraph, index: ComfyObjectInfoIndex): WorkflowReconcile {
-  const unknown = new Set<string>();
-  const missingEnumValues: MissingEnumValue[] = [];
-  for (const [nodeId, node] of Object.entries(graph)) {
-    const classType = node.class_type ?? "";
-    if (!index.classNames.has(classType)) {
-      unknown.add(classType);
-      continue; // 类都没有，枚举无从核对
-    }
-    const enums = index.enumsByClass.get(classType);
-    if (!enums) continue;
-    const inputs = node.inputs && typeof node.inputs === "object" ? node.inputs : {};
-    for (const [inputKey, value] of Object.entries(inputs)) {
-      if (typeof value !== "string" || !value.trim() || value.includes("{{")) continue; // 连线/空值/模板占位不核
-      const options = enums.get(inputKey);
-      // 严格按类型比对，与 ComfyUI 的 `val in combo_options` 同口径：字符串 "8" 对不上数字选项 8。
-      if (!options || options.includes(value)) continue;
-      missingEnumValues.push({ nodeId, classType, title: node._meta?.title, inputKey, value });
-    }
-  }
-  return { unknownNodeTypes: [...unknown], missingEnumValues };
-}
-
-/** 单个 combo 选项列表烤入上限（2000 个 LoRA 的机器别把 catalog 撑爆；对账/报错不受此限）。 */
-const ENUM_BAKE_CAP = 400;
-
-/**
- * 收集「图里出现的 (classType, inputKey) → 本机 combo 可选值」（纯函数）。
- * reconcile 时顺手带出，导入/保存时经 buildImportedWorkflow 烤进参数控件——
- * checkpoint/LoRA 这类文件名参数在画布上变成列真实文件的下拉，不再手抄文件名拼错 400。
- */
-export function collectGraphEnumOptions(graph: ComfyGraph, index: ComfyObjectInfoIndex): WorkflowEnumOption[] {
-  const seen = new Set<string>();
-  const out: WorkflowEnumOption[] = [];
-  for (const node of Object.values(graph)) {
-    const enums = index.enumsByClass.get(node.class_type ?? "");
-    if (!enums) continue;
-    const inputs = node.inputs && typeof node.inputs === "object" ? node.inputs : {};
-    for (const [inputKey, value] of Object.entries(inputs)) {
-      // 只给字符串值的 widget 烤下拉：数值/布尔值的 combo（bit_depth=8、rescale_after_model=true）
-      // 导入面板按值推成数字框/开关，本身就按原类型发回，不用下拉；连线也不核。
-      if (typeof value !== "string") continue;
-      const options = enums.get(inputKey);
-      if (!options || options.length === 0) continue;
-      const key = `${node.class_type} ${inputKey}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ classType: node.class_type ?? "", inputKey, options: options.slice(0, ENUM_BAKE_CAP) });
-    }
-  }
-  return out;
 }
 
 function setInput(graph: ComfyGraph, nodeId: string, inputKey: string, value: string): void {
@@ -660,6 +684,30 @@ export function buildComfyImportModelMapping(
           ? { model_url: "model_url", error_message: "error" }
           : { image_url: "image_url", error_message: "error" },
   };
+  // 能力契约：ComfyUI 绑定已经把输入面说清楚了（提示词节点 / 媒体槽 / 数值参数 / 产物类型），
+  // 缺的不是信息而是翻译。不写这份契约 ⇒ resolveArchetypeForModel 认不出这条通道 ⇒
+  // 设置页永远显示「输入与生成方式 · 尚未设置」，画布模型列表被「完成输入与请求方式后…」挡在门外。
+  const capabilityContract = buildComfyuiCapabilityContract({
+    kind: imported.kind,
+    taskKinds: [imported.taskKind],
+    promptRequired: Boolean(normalizedDraft?.binding.promptNodeId && normalizedDraft.binding.promptInputKey),
+    mediaSlots: imported.parameters
+      .filter((param) => param.type === "image-url")
+      .map((param) => ({
+        key: param.key,
+        label: param.label,
+        mediaKind: param.mediaKind ?? "image",
+      })),
+    params: imported.parameters
+      .filter((param) => param.type !== "image-url")
+      .map((param) => ({
+        key: param.key,
+        label: param.label,
+        type: param.type as "number" | "text" | "boolean" | "select",
+        default: param.default,
+        ...(param.options ? { options: param.options } : {}),
+      })),
+  });
   return {
     model: {
       modelKey: opts.modelKey,
@@ -672,6 +720,7 @@ export function buildComfyImportModelMapping(
       meta: {
         parameters: imported.parameters,
         ...(normalizedDraft ? { comfyWorkflowImport: normalizedDraft } : {}),
+        ...(capabilityContract ? { customCapabilityContract: capabilityContract } : {}),
       },
     },
     mapping: { vendorKey, taskKind: imported.taskKind, modelKey: opts.modelKey, name: opts.labelZh, enabled: false, create, query },

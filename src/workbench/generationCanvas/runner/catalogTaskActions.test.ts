@@ -977,11 +977,19 @@ describe('normalizeCatalogTaskResult — 终态失败抛出的是上游真原因
 // 群反馈 2026-07-30：Codex 生图「接入正常、到拉取步骤超时」——根因是本地生图(codex `codex exec $imagegen`,
 // 官方 smoke 就 ~75s)被按快道云 API 的 2min 硬超时腰斩。修法：按「后端时延」分档,本地进程后端进慢道。
 describe('resolvePollBudget / isSlowLaneBackend — 轮询超时按后端时延分档（本地生图不被云 API 的 2min 腰斩）', () => {
-  it('本地进程后端(codex-local/comfyui-local)的图像任务走慢道（5min 软 / 20min 硬），不是 2min', () => {
-    for (const vendor of ['codex-local', 'comfyui-local']) {
-      for (const kind of ['text_to_image', 'image_edit'] as const) {
-        expect(isSlowLaneBackend(kind, vendor)).toBe(true)
-        expect(resolvePollBudget(kind, vendor)).toEqual({ softMs: 300000, hardMs: 1200000 })
+  it('本地进程后端(codex-local)的图像任务走慢道（5min 软 / 20min 硬），不是 2min', () => {
+    for (const kind of ['text_to_image', 'image_edit'] as const) {
+      expect(isSlowLaneBackend(kind, 'codex-local')).toBe(true)
+      expect(resolvePollBudget(kind, 'codex-local')).toEqual({ softMs: 300000, hardMs: 1200000 })
+    }
+  })
+
+  // ComfyUI 2026-10-23 单列一档：它跑的是用户自己的工作流（分镜循环/批量产物，几十分钟起步），
+  // 与「云端视频 API 有 SLA」不是一回事。压回 20min 等于把长片腰斩成「可找回」。
+  it('ComfyUI（含第 2+ 台实例）走 10min 软 / 90min 硬，且与任务种类无关', () => {
+    for (const vendor of ['comfyui-local', 'comfyui-local-hz01']) {
+      for (const kind of ['text_to_image', 'image_edit', 'text_to_video'] as const) {
+        expect(resolvePollBudget(kind, vendor)).toEqual({ softMs: 600000, hardMs: 5400000 })
       }
     }
   })

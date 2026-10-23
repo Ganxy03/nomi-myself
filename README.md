@@ -194,3 +194,4 @@ Bug reports, feature proposals, documentation, and code contributions are welcom
 Current releases are licensed under AGPL-3.0-only; historical releases published under Apache-2.0 keep their original license.
 
 See [LICENSE](LICENSE). Paid services can include AGPL-compliant custom development, integration, deployment, training, and ongoing iteration. Nomi does not offer a closed-source distribution that withholds the corresponding source code.
+# nomi-myself

@@ -63,7 +63,10 @@ const socketsByBase = new Map<string, SocketHolder>();
 /** 该 server 当前正在执行的 prompt（binary 预览帧不带 prompt_id，归属按此判）。 */
 const currentPromptByBase = new Map<string, string>();
 
-const ENTRY_TTL_MS = 30 * 60 * 1000; // 慢道硬超时 20min 之上留余量
+// 轮询硬超时已放宽到 90min（catalogTaskActions 的 COMFYUI_POLL_BUDGET_MS），这里必须跟着放宽：
+// 否则一条跑了 40 分钟的长片在第 30 分钟被当成「没人管」回收掉，节点上的实时进度条凭空消失
+// （任务本身照跑不受影响，但用户会以为卡死了）。
+const ENTRY_TTL_MS = 100 * 60 * 1000; // 硬超时 90min 之上留余量（与 catalogTaskActions 配对，改一处必改另一处）
 const PREVIEW_MIN_INTERVAL_MS = 450;
 const PREVIEW_MAX_BYTES = 1_500_000;
 const QUEUE_PROBE_MIN_INTERVAL_MS = 2_000;

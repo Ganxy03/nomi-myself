@@ -162,6 +162,7 @@ export const enModelDisplayText: Readonly<Record<string, string>> = {
   即梦: 'Dreamina',
   本地: 'Local',
   '本地 ComfyUI': 'Local ComfyUI',
+  '由导入的 ComfyUI 工作流自动识别': 'Detected from the imported ComfyUI workflow',
   // 内置供应商种子(electron/catalog/builtinVendorSeeds.ts)的展示名——设置→模型 / 设置→AI 里那行标题。
   // 每个种子名都必须在这儿有译名或登记成语言中立品牌名,由 check:i18n 的 vendor-seed-name 门岗兜底。
   //

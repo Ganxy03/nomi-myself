@@ -153,6 +153,52 @@ export function ComfyuiWorkflowSettingsPage({
   // 看起来像输入丢了。workflowKeys 只在真的增删工作流时才变，那时重置才是对的。
   const draftOf = catalog.draftOf
   const labelOf = catalog.labelOf
+
+  /**
+   * 认证放宽（2026-10-23）：「跳过真实验证，直接启用」。
+   *
+   * 为什么要有这条：规范路径是跑一次真的候选运行（POST /prompt → /history → /view），长视频
+   * 工作流一次 40 分钟，还要求机器上节点/模型都齐；用户就是想先跑起来看看时，这条链成了拦路虎。
+   * 放行会在目录里落 `verification: "manual_ack"` 的痕迹（主进程 comfyuiManualEnable），
+   * 所以「没验过」这件事在库里、在 UI 上都还看得见，不会被事后当成验过。
+   */
+  const [manualEnable, setManualEnable] = React.useState<{ ok: boolean; reason?: string } | null>(null)
+  React.useEffect(() => {
+    const bridge = getDesktopBridge()?.modelCatalog
+    if (!bridge?.getComfyuiManualEnableAvailability || !selectedModelKey) {
+      setManualEnable(null)
+      return
+    }
+    let cancelled = false
+    void bridge.getComfyuiManualEnableAvailability(vendorKey, selectedModelKey)
+      .then((r) => { if (!cancelled) setManualEnable(r ?? null) })
+      .catch(() => { if (!cancelled) setManualEnable(null) })
+    return () => { cancelled = true }
+  }, [vendorKey, selectedModelKey, refreshToken])
+
+  const skipVerification = React.useCallback(async () => {
+    if (!selectedModelKey) return
+    const label = name.trim() || labelOf(selectedModelKey)
+    const ok = await confirmDialog({
+      title: t('comfyuiWorkflowPage.manualEnable.title'),
+      message: t('comfyuiWorkflowPage.manualEnable.message', { name: label }),
+      confirmLabel: t('comfyuiWorkflowPage.manualEnable.confirm'),
+      danger: true,
+    })
+    if (!ok) return
+    setError('')
+    try {
+      const r = await getDesktopBridge()?.modelCatalog?.manuallyEnableComfyWorkflow?.(vendorKey, selectedModelKey)
+      if (!r) throw new Error(t('comfyuiWorkflowPage.errors.unsupported'))
+      if (!r.ok) throw new Error(r.error)
+      setVerificationPending(false)
+      bumpAll()
+    } catch (value) {
+      setError(t('comfyuiWorkflowPage.errors.manualEnableFailed', {
+        error: value instanceof Error ? value.message : String(value),
+      }))
+    }
+  }, [selectedModelKey, name, labelOf, vendorKey, bumpAll, setError, t])
   React.useEffect(() => {
     if (!catalog.ready) return
     if (!selectedModelKey) { setAnalysis(null); setBinding(null); setGraphText(''); setUiWorkflowText(''); setName(''); return }
@@ -450,6 +496,18 @@ export function ComfyuiWorkflowSettingsPage({
                   ) : null}
                 </div>
               </div>
+              {/* 认证放宽：跳过真实验证直接放行（留痕 manual_ack）。默认收着，按钮只在「已导入未启用」时出现。 */}
+              {manualEnable?.ok ? (
+                <button
+                  type="button"
+                  onClick={() => void skipVerification()}
+                  disabled={busy}
+                  title={t('comfyuiWorkflowPage.manualEnable.hint')}
+                  className="inline-flex h-7 items-center gap-1 rounded-nomi-sm border border-nomi-line px-2 text-micro text-nomi-ink-60 hover:text-nomi-accent disabled:opacity-45"
+                >
+                  {t('comfyuiWorkflowPage.manualEnable.action')}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void remove()}

@@ -81,14 +81,28 @@ describe("ComfyUI certification fixtures", () => {
     expect(result.referenceAudioUrls).toEqual([result.comfy_audio_1]);
   });
 
-  it("fails closed when a workflow declares more media slots than fixtures", () => {
-    const slots = Array.from({ length: 9 }, (_, index) => ({
+  // 2026-10-23：上限从 8 张提到 16 张（MiniMax-H3 允许 9 张参考图，9 张时验证迈不出去）。
+// 这里仍要守住「槽数 > 夹具数就闭门失败」这条契约——夹具不够时绝不能悄悄复用同一张图，
+// 那等于没验证接线。上限数字跟夹具走，别写死。
+it("fails closed when a workflow declares more media slots than fixtures", () => {
+    const slots = Array.from({ length: 17 }, (_, index) => ({
       paramKey: `comfy_image_${index + 1}`,
       label: `Image ${index + 1}`,
       mediaKind: "image" as const,
     }));
     expect(() => buildComfyCertificationFixtureParams({ vendorKey: "v", modelKey: "m", slots })).toThrow(
-      "comfy_certification_fixture_capacity:8",
+      /comfy_certification_fixture_capacity:\d+/,
     );
+  });
+
+  it("gives every image slot a distinct fixture (16 slots, 16 distinct PNGs)", () => {
+    const slots = Array.from({ length: 16 }, (_, index) => ({
+      paramKey: `comfy_image_${index + 1}`,
+      label: `Image ${index + 1}`,
+      mediaKind: "image" as const,
+    }));
+    const params = buildComfyCertificationFixtureParams({ vendorKey: "v", modelKey: "m", slots });
+    const values = slots.map((slot) => String(params[slot.paramKey]));
+    expect(new Set(values).size).toBe(16);
   });
 });

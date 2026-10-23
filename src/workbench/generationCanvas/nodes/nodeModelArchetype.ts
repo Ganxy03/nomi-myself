@@ -8,6 +8,7 @@ import {
   buildDynamicControls,
   buildEffectiveImageCatalogConfig,
   buildEffectiveVideoCatalogConfig,
+  isImportedComfyWorkflowModel,
 } from './controls/parameterControlModel'
 import { specializeArchetypeForVariant } from '../../../../electron/shared/modelArchetypes'
 import {
@@ -19,6 +20,7 @@ import {
 import { translateModelDisplayText } from '../../../i18n/modelDisplayText'
 import { isModelRecentlyAiling } from '../runner/modelHealthMemory'
 import { usesExplicitParameterReferenceDeclarations } from '../model/parameterReferenceSlots'
+import { isComfyuiVendorKey } from '../model/comfyuiVendor'
 
 export function chooseDefaultModelOption(
   options: readonly ModelOption[],
@@ -70,6 +72,23 @@ export function resolveRenderedControls(
   isImageLike: boolean,
   isVideoLike: boolean,
 ): DynamicModelControl[] {
+  // ComfyUI 的参数是**工作流/预置自己**的（宽度/步数/帧率…），由 meta.parameters 平铺声明，
+  // 画布的通用出槽器（buildImageUrlSlots）也从这里读。走档案分支会换成「档案模式参数」那套
+  // 渲染口径（少了显式媒体声明、少了 imageCatalogConfig），把用户在工作流里认得的控件换掉。
+  // ComfyUI 现在也有能力契约（见 comfyuiCapabilityContract），但契约里的参数只用于**展示**，
+  // 渲染口径仍然是平铺的那份——判据：供应商是 ComfyUI（导入进来的工作流）或内置 ComfyUI 预置。
+  if (option && (isImportedComfyWorkflowModel(option.meta) || isComfyuiVendorKey(option.vendor))) {
+    return localizeDynamicControls(
+      buildDynamicControls({
+        parameterControls: parseModelParameterControls(option?.meta),
+        imageCatalogConfig: buildEffectiveImageCatalogConfig(option?.meta),
+        videoCatalogConfig: buildEffectiveVideoCatalogConfig(option?.meta),
+        isImageLike,
+        isVideoLike,
+        explicitMediaParametersOnly: usesExplicitParameterReferenceDeclarations(option?.meta, option?.vendor),
+      }),
+    )
+  }
   const archetype = resolveArchetypeForOption(option)
   if (archetype) {
     // 变体特化：选中变体可能收窄某 mode 的参数（如 Seedance fast 的 resolution 仅 480/720）。

@@ -40,11 +40,48 @@ export function isComfyComboValue(value: unknown): value is ComfyComboValue {
   return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
 }
 
+/**
+ * 一个输入槽的**声明事实**（2026-10-23 新增）。以前这份索引只认 combo 枚举，于是「这个槽收什么」全靠
+ * 拿节点类名去正则猜——H3StudioDirector / H3RefRouter / H3SafeLoadImage 这类自建节点一律认不出，
+ * 用户只能逐个手绑。而 ComfyUI 本来就把答案写在 /object_info 里：`input.required.image = ["IMAGE", {}]`。
+ * 认它比猜类名可靠：类名是作者随手起的，类型是节点自己申报的。
+ */
+export type ComfyInputSpec = {
+  /** 声明类型（STRING/INT/FLOAT/BOOLEAN/IMAGE/VIDEO/AUDIO/LATENT/MODEL/CLIP…）。combo 没有声明类型 → ""。 */
+  type: string;
+  /** 声明在 optional 组（required=false）。同一个键名 required 与 optional 同时出现时以 required 为准。 */
+  optional: boolean;
+  /** combo 可选值（老/新两种 spec 格式都收）；非 combo 为 undefined。 */
+  options?: ComfyComboValue[];
+  /** spec[1] 里的数值控件元数据，仅在有值时带出（给参数控件做人话标签/范围用）。 */
+  min?: number;
+  max?: number;
+  step?: number;
+  tooltip?: string;
+  multiline?: boolean;
+};
+
+/** 一个节点类的完整能力事实。 */
+export type ComfyClassInfo = {
+  /** inputKey → 槽位事实。 */
+  inputs: Map<string, ComfyInputSpec>;
+  /** RETURN_TYPES（输出槽类型名，按槽序）。 */
+  outputs: string[];
+  /** OUTPUT_NODE：该类是否会在执行结束时把产物挂到 history 里。 */
+  outputNode: boolean;
+};
+
 export type ComfyObjectInfoIndex = {
   /** 本机已装的全部节点 class_type。 */
   classNames: Set<string>;
   /** class_type → (inputKey → combo 可选值，按 wire 原类型)。老/新两种 spec 格式都收（文件名/采样器这类枚举）；remote 动态下拉不收。 */
   enumsByClass: Map<string, Map<string, ComfyComboValue[]>>;
+  /**
+   * class_type → 槽位/输出事实（2026-10-23 新增，工作流识别的**主**依据）。
+   * 以前这份索引只认类名 + combo 枚举，见 ComfyInputSpec 注释里「靠类名正则猜」的来龙去脉。
+   * 没有任何类时为空 Map（对账照旧，只是不做类型增强）。
+   */
+  classes: Map<string, ComfyClassInfo>;
   /**
    * 真正「没见过的」combo 外壳（既不是老格式数组、也不是已知的 COMBO/DynamicCombo 两个家族）。
    * 不是每次「取不到枚举」都进这里——remote-only combo、DynamicCombo 这类是**已知但本地无列表**，
@@ -142,31 +179,82 @@ function classifyComboSpec(spec: unknown): ComboClassification {
   return { kind: "not-combo" }; // 普通类型名（INT/STRING/IMAGE/…），不是 combo 语义
 }
 
+/**
+ * 一个输入 spec → 槽位事实。combo 分支复用 classifyComboSpec（外壳判据只有一份，见其注释）。
+ * `type` 取 spec[0] 的**声明类型名字符串**：正常类型（STRING/INT/IMAGE…）原样留；combo / DynamicCombo 留 ""。
+ * 「type 长得像类型名」不额外白名单校验——真机上见过的类型名远多过内置那几个（CONDITIONING/SIGMAS/
+ * GUIDER/UPSCALE_MODEL/CONTROL_NET/Sampler/ImageBatch/LatentBatch…），白名单只会漏；判据交给消费方
+ * （comfyuiWorkflowImport 只认自己用得上的那几个族），这里如实转录。
+ */
+function parseInputSpec(spec: unknown, optional: boolean, unknownComboShapes: ComfyUnknownComboSpec[], classType: string, inputKey: string): ComfyInputSpec | null {
+  if (!Array.isArray(spec) || spec.length === 0) return null;
+  const combo = classifyComboSpec(spec);
+  if (combo.kind === "unknown-shape") {
+    if (unknownComboShapes.length < MAX_UNKNOWN_COMBO_SHAPES) unknownComboShapes.push({ classType, inputKey, spec });
+    return null;
+  }
+  const out: ComfyInputSpec = { type: "", optional };
+  if (combo.kind === "options") out.options = combo.options;
+  const head: unknown = spec[0];
+  if (typeof head === "string" && head !== "COMBO" && !KNOWN_NON_ENUM_COMBO_FAMILY.has(head)) out.type = head;
+  const cfg = isRec(spec[1]) ? spec[1] : {};
+  if (typeof cfg.min === "number") out.min = cfg.min;
+  if (typeof cfg.max === "number") out.max = cfg.max;
+  if (typeof cfg.step === "number") out.step = cfg.step;
+  if (typeof cfg.tooltip === "string") out.tooltip = cfg.tooltip;
+  if (cfg.multiline === true) out.multiline = true;
+  return out;
+}
+
+/** RETURN_TYPES → 输出槽类型名。异形（对象式 V3 schema、缺字段）一律收敛成空数组，不猜。 */
+function parseOutputTypes(def: Record<string, unknown>): string[] {
+  const output = def.output;
+  if (Array.isArray(output)) {
+    const out: string[] = [];
+    for (const slot of output) {
+      if (typeof slot === "string") out.push(slot);
+      else if (isRec(slot)) {
+        const name = typeof slot.name === "string" ? slot.name : typeof slot.type === "string" ? slot.type : "";
+        if (name) out.push(name);
+      }
+    }
+    return out;
+  }
+  if (isRec(output)) {
+    // 对象式：{ IMAGE: {…}, LATENT: {…} }——键名就是类型名。
+    return Object.keys(output).filter((key) => typeof key === "string" && key.length > 0);
+  }
+  return [];
+}
+
 /** 纯解析（可单测）：/object_info 全量或 /object_info/{class} 子集 → 能力索引。任何异形都跳过、不抛。 */
 export function parseObjectInfoIndex(json: unknown): ComfyObjectInfoIndex {
   const classNames = new Set<string>();
   const enumsByClass = new Map<string, Map<string, ComfyComboValue[]>>();
+  const classes = new Map<string, ComfyClassInfo>();
   const unknownComboShapes: ComfyUnknownComboSpec[] = [];
-  if (!isRec(json)) return { classNames, enumsByClass, unknownComboShapes };
+  if (!isRec(json)) return { classNames, enumsByClass, classes, unknownComboShapes };
   for (const [classType, def] of Object.entries(json)) {
     if (!isRec(def)) continue;
     classNames.add(classType);
     const input = isRec(def.input) ? def.input : {};
     const enums = new Map<string, ComfyComboValue[]>();
-    for (const group of [input.required, input.optional]) {
+    const inputs = new Map<string, ComfyInputSpec>();
+    // required 先写、optional 后写且**不覆盖**：同名槽以 required 为准（ComfyUI 校验也是 required 优先）。
+    for (const [optional, group] of [[false, input.required], [true, input.optional]] as const) {
       if (!isRec(group)) continue;
       for (const [inputKey, spec] of Object.entries(group)) {
-        const result = classifyComboSpec(spec);
-        if (result.kind === "options") {
-          enums.set(inputKey, result.options);
-        } else if (result.kind === "unknown-shape" && unknownComboShapes.length < MAX_UNKNOWN_COMBO_SHAPES) {
-          unknownComboShapes.push({ classType, inputKey, spec });
-        }
+        if (optional && inputs.has(inputKey)) continue;
+        const parsed = parseInputSpec(spec, optional, unknownComboShapes, classType, inputKey);
+        if (!parsed) continue;
+        inputs.set(inputKey, parsed);
+        if (parsed.options) enums.set(inputKey, parsed.options);
       }
     }
     if (enums.size > 0) enumsByClass.set(classType, enums);
+    classes.set(classType, { inputs, outputs: parseOutputTypes(def), outputNode: def.output_node === true });
   }
-  return { classNames, enumsByClass, unknownComboShapes };
+  return { classNames, enumsByClass, classes, unknownComboShapes };
 }
 
 function normalizeBase(baseUrl: string): string {

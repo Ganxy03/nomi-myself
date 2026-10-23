@@ -112,4 +112,17 @@ export type DesktopModelCatalogSurface = CustomCallBridge & {
   /** 用同一 modelKey 更新已导入 workflow（同步）。 */
   updateComfyWorkflow?: (payload: { modelKey: string; text: string; binding: unknown; labelZh: string; enumOptions?: unknown; vendorKey?: string; uiWorkflowText?: string }) =>
     ComfyWorkflowMutationResult
+  /**
+   * 「完全 ComfyUI 模式」：打开后模型清单只留 ComfyUI 实例名下的条目（画布下拉 / 任务中心 /
+   * Agent 的可选模型三处一起收窄）。全局意图，不绑具体哪台机器。旧 preload 可能没有 → 可选。
+   */
+  getComfyuiOnlyMode?: () => Promise<{ enabled: boolean }>
+  setComfyuiOnlyMode?: (enabled: boolean) => Promise<{ ok: true; enabled: boolean } | { ok: false; error: string }>
+  /** 认证放宽：这条工作流现在能不能「跳过真实验证直接启用」，以及挡门原因。旧 preload 可能没有 → 可选。 */
+  getComfyuiManualEnableAvailability?: (vendorKey: string, modelKey: string) => Promise<{ ok: boolean; reason?: string }>
+  /** 认证放宽：真的放行（留痕 manual_ack）。返回落痕后的已发布模式。 */
+  manuallyEnableComfyWorkflow?: (vendorKey: string, modelKey: string) => Promise<
+    | { ok: true; vendorKey: string; modelKey: string; publishedModes: string[]; alreadyEnabled: boolean }
+    | { ok: false; error: string }
+  >
 }

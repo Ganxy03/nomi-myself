@@ -14,7 +14,7 @@ import {
   type WorkflowBinding,
   type WorkflowEnumOption,
 } from "./comfyuiWorkflowImport";
-import { bustComfyObjectInfoCache, fetchComfyuiObjectInfoIndex, isComfyComboValue, type ComfyUnknownComboSpec } from "../comfyuiObjectInfo";
+import { bustComfyObjectInfoCache, fetchComfyuiObjectInfoIndex, isComfyComboValue, type ComfyObjectInfoIndex, type ComfyUnknownComboSpec } from "../comfyuiObjectInfo";
 import { convertUiWorkflowToApi, looksLikeUiWorkflow } from "../comfyuiGraphConvert";
 import { COMFYUI_VENDOR_KEY, isComfyuiVendor } from "./types";
 import {
@@ -55,7 +55,8 @@ export type ReconcileWorkflowBatchResult =
   | { ok: true; results: Array<{ id: string; result: ReconcileWorkflowResult }> }
   | { ok: false; error: string };
 
-/** 校验 + 分析（供 UI 映射预览）。坏格式返回 { ok:false, error } 而非抛——IPC 好透传成人话提示。 */
+/** 校验 + 分析（供 UI 映射预览）。坏格式返回 { ok:false, error } 而非抛——IPC 好透传成人话提示。
+ *  不带索引 = 纯类名启发式（同步路径拿不到 /object_info，见 analyzeComfyWorkflow 的 index 形参注释）。 */
 export function analyzeComfyWorkflowText(text: unknown): AnalyzeWorkflowResult {
   try {
     const graph = parseComfyApiWorkflow(String(text ?? ""));
@@ -65,28 +66,58 @@ export function analyzeComfyWorkflowText(text: unknown): AnalyzeWorkflowResult {
   }
 }
 
+/** 本机能力索引（声明类型 / combo / 已装节点类）。拿不到就 null，分析照旧按类名启发式跑，不阻断。 */
+async function objectInfoFor(vendorKey: string): Promise<ComfyObjectInfoIndex | null> {
+  const vendor = readCatalog().vendors.find((v) => v.key === vendorKey);
+  return fetchComfyuiObjectInfoIndex(String(vendor?.baseUrlHint || ""));
+}
+
 /**
  * 分析 + **界面格式自动转换**（异步版，T1）。用户贴什么格式都吃：
  *   API 格式 → 直接分析（与同步版同结果）
  *   界面格式 → 借用户自己 ComfyUI 的前端转成 API 格式再分析（转不动就说明要启动当前 ComfyUI）
  * 转换成功时回 convertedText，UI 用它替换掉用户贴的原文，后续导入/编辑链一律走 API 格式（单一形态）。
+ *
+ * 2026-10-23：顺带把**本机 /object_info 能力索引**喂进分析。结构识别从「拿类名做正则」升级成
+ * 「读节点自己申报的槽类型与输出类型」——H3RefRouter / H3StudioDirector / 各种 Save* 自建节点
+ * 由此可被自动认出，不必用户逐个手绑。取不到索引时整条链退回旧启发式（同一个函数出口，行为不倒退）。
  */
 export async function analyzeComfyWorkflowTextSmart(text: unknown, vendorKey?: unknown): Promise<AnalyzeWorkflowResult> {
   const raw = String(text ?? "");
-  const direct = analyzeComfyWorkflowText(raw);
-  if (direct.ok || !looksLikeUiWorkflow(raw)) return direct;
-
   const targetKey = comfyVendorKeyOf(vendorKey);
-  const vendor = readCatalog().vendors.find((v) => v.key === targetKey);
-  const converted = await convertUiWorkflowToApi(String(vendor?.baseUrlHint || ""), raw);
-  if (!converted.ok) {
-    // 转不动 → 保持解析层的恢复指引，并把转换失败原因附后，便于排查。
-    return { ok: false, error: `${direct.ok ? "" : direct.error}（自动转换也没成：${converted.error}）` };
+  const apiText = looksLikeUiWorkflow(raw)
+    ? await convertToApiText(raw, targetKey)
+    : { ok: true as const, text: raw };
+  const index = await objectInfoFor(targetKey);
+  try {
+    const graph = parseComfyApiWorkflow(apiText.ok ? apiText.text : raw);
+    const analysis = analyzeComfyWorkflow(graph, index);
+    return apiText.ok
+      ? { ok: true, analysis, convertedText: apiText.text, sourceWorkflowText: raw }
+      : { ok: true, analysis };
+  } catch (e) {
+    if (!apiText.ok) {
+      // 转不动 → 保持解析层的恢复指引，并把转换失败原因附后，便于排查。
+      return { ok: false, error: `${apiText.parseError}（自动转换也没成：${apiText.error}）` };
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-  const convertedText = JSON.stringify(converted.api, null, 2);
-  const after = analyzeComfyWorkflowText(convertedText);
-  if (!after.ok) return after;
-  return { ...after, convertedText, sourceWorkflowText: raw };
+}
+
+/** 界面格式 → API 格式。失败时把**两种**失败原因都带着走（解析层的恢复指引 + 转换失败原因）。 */
+async function convertToApiText(raw: string, vendorKey: string): Promise<
+  { ok: true; text: string } | { ok: false; error: string; parseError: string }
+> {
+  let parseError = "";
+  try {
+    parseComfyApiWorkflow(raw);
+  } catch (e) {
+    parseError = e instanceof Error ? e.message : String(e);
+  }
+  const vendor = readCatalog().vendors.find((v) => v.key === vendorKey);
+  const converted = await convertUiWorkflowToApi(String(vendor?.baseUrlHint || ""), raw);
+  if (!converted.ok) return { ok: false, error: converted.error, parseError };
+  return { ok: true, text: JSON.stringify(converted.api, null, 2) };
 }
 
 /**

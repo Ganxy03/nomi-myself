@@ -371,6 +371,43 @@ describe("ComfyUI 内置种子", () => {
   it("内置文生图声明 request_transform=comfyui-prompt（ckpt 留空 derive 的挂点）", () => {
     expect(COMFYUI_CURATED_MAPPINGS[0].create.request_transform).toBe("comfyui-prompt");
   });
+
+  // 内置预置也得有能力契约：否则设置页显示「输入与生成方式 · 尚未设置」，
+  // 画布模型列表被「完成输入与请求方式后，才能显示在画布的模型列表中」挡在门外——
+  // 而这条预置只有一种生成方式（文生图）、提示词必填，没什么好问用户的。
+  it("内置文生图带能力契约：一条文生图方式 + 提示词必填 + 参数照抄 meta.parameters", () => {
+    const { state } = applyBuiltinSeeds(emptyState(), "2026-07-04T00:00:00.000Z");
+    const model = state.models.find((m) => m.modelKey === "comfyui-txt2img" && m.vendorKey === "comfyui-local");
+    const meta = model?.meta as {
+      parameters?: Array<{ key: string }>;
+      customCapabilityContract?: { kind: string; defaultModeId: string; modes: Array<{ id: string; promptRequired: boolean; params: Array<{ key: string }> }> };
+    };
+    const contract = meta?.customCapabilityContract;
+    expect(contract).toBeDefined();
+    expect(contract?.kind).toBe("image");
+    expect(contract?.defaultModeId).toBe("text_to_image");
+    expect(contract?.modes.map((m) => m.id)).toEqual(["text_to_image"]);
+    expect(contract?.modes[0].promptRequired).toBe(true);
+    // 契约的参数不是另抄一份——与 meta.parameters 一一对应（漂了就说明有两份真相源）。
+    expect(contract?.modes[0].params.map((p) => p.key)).toEqual(meta?.parameters?.map((p) => p.key));
+  });
+
+  it("老装机自愈：已有行缺契约 → 下次播种补上（seed 对账按 meta 漂移）", () => {
+    const first = applyBuiltinSeeds(emptyState(), "2026-07-04T00:00:00.000Z");
+    const withoutContract = {
+      ...first.state,
+      models: first.state.models.map((m) => {
+        if (m.modelKey !== "comfyui-txt2img") return m;
+        const meta = { ...(m.meta as Record<string, unknown>) };
+        delete meta.customCapabilityContract;
+        return { ...m, meta };
+      }),
+    };
+    const second = applyBuiltinSeeds(withoutContract, "2026-07-04T00:00:00.000Z");
+    expect(second.changed).toBe(true);
+    const model = second.state.models.find((m) => m.modelKey === "comfyui-txt2img");
+    expect((model?.meta as { customCapabilityContract?: unknown })?.customCapabilityContract).toBeDefined();
+  });
 });
 
 describe("fillEmptyCheckpoint（ckpt_name 留空 → 本机第一个 checkpoint）", () => {
