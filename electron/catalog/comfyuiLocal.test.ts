@@ -288,7 +288,7 @@ describe("comfyui workflow 图注入（真管线，证 comfy_* 键存活 + 数�
     // checkpoint 默认留空（提交前由 "comfyui-prompt" 请求变换按本机 /object_info derive，见 fillEmptyCheckpoint 测试）
     expect(body.prompt["4"].inputs.ckpt_name).toBe("");
     // ★ 关键：数字保持 number（comfy_* 键没被 taskTemplateParams 的标准键派生清成 undefined）
-    expect(body.prompt["3"].inputs.seed).toBe(156680208700286);
+    expect(body.prompt["3"].inputs.seed).toBe(156680208700);
     expect(typeof body.prompt["3"].inputs.seed).toBe("number");
     expect(body.prompt["3"].inputs.steps).toBe(20);
     expect(body.prompt["3"].inputs.cfg).toBe(7);

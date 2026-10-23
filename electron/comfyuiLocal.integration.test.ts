@@ -175,7 +175,7 @@ describe("本地 ComfyUI 传输链（真 HTTP 端到端）", () => {
     expect(lastPromptBody?.prompt?.["10"]).toBeUndefined();
     expect(lastPromptBody?.prompt?.["12"]).toBeUndefined();
     expect(lastPromptBody?.prompt?.["11"]?.inputs).toEqual({ required: ["6", 0] });
-    expect(lastPromptBody?.prompt?.["3"]?.inputs?.seed).toBe(156680208700286);
+    expect(lastPromptBody?.prompt?.["3"]?.inputs?.seed).toBe(156680208700);
     expect(typeof lastPromptBody?.prompt?.["5"]?.inputs?.width).toBe("number");
     expect(lastPromptBody?.client_id).toMatch(/^nomi-[0-9a-f-]{36}$/);
     expect(lastPromptBody?.prompt_id).toBe(REQUEST_PROMPT_ID);
